@@ -1,2 +1,73 @@
 # FlareTuner
-Effortless BBR &amp; Network tuning for modern Linux servers.
+
+FlareTuner is an interactive Bash script for applying conservative network tuning profiles on Debian and Ubuntu VPS servers. The script focuses on enabling standard Linux BBR with `fq` and writing a small managed sysctl configuration based on the selected server profile.
+
+## MVP Scope
+
+The script MVP supports:
+
+- Debian and Ubuntu only.
+- Previewing a generated tuning profile.
+- Applying a generated tuning profile as root.
+- Restoring the latest FlareTuner-managed backup.
+- Inspecting current network tuning status.
+
+Non-goals for this MVP:
+
+- Installing, replacing, or upgrading the kernel.
+- BBRv2 tuning.
+- Benchmarking or proving performance gains.
+- Supporting non-Debian and non-Ubuntu distributions.
+
+## Usage
+
+Run the interactive menu:
+
+```bash
+bash scripts/flaretuner.sh
+```
+
+Apply mode requires root privileges:
+
+```bash
+sudo bash scripts/flaretuner.sh
+```
+
+The menu can preview tuning, apply tuning, restore the latest FlareTuner backup, or show current network tuning status.
+
+## Safety
+
+FlareTuner writes only its managed sysctl file:
+
+```text
+/etc/sysctl.d/99-flaretuner.conf
+```
+
+It does not edit `/etc/sysctl.conf`.
+
+Backup metadata and backups are stored under:
+
+```text
+/var/lib/flaretuner/
+```
+
+The restore menu restores the latest FlareTuner-managed backup. If no previous managed file existed, restore removes the managed file. Apply failures trigger restoration of the previous managed file when possible.
+
+## Tuning Rules
+
+See [docs/tuning-rules.md](docs/tuning-rules.md) for the profile inputs, baseline settings, workload behavior, low-memory safety rules, and rollback model.
+
+## Development
+
+Run shell syntax checks:
+
+```bash
+bash -n scripts/flaretuner.sh
+bash -n tests/flaretuner_test.sh
+```
+
+Run the test suite:
+
+```bash
+bash tests/flaretuner_test.sh
+```
