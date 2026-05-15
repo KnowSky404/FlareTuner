@@ -129,6 +129,66 @@ write_latest_backup_metadata() {
   } >"$LATEST_BACKUP_FILE"
 }
 
+metadata_path_is_safe() {
+  local path="$1"
+
+  [[ "$path" != *".."* ]] || return 1
+  [[ "$path" =~ ^[A-Za-z0-9._/:-]*$ ]]
+}
+
+load_backup_metadata() {
+  local line key value
+  local seen_previous_exists=0
+  local seen_backup_path=0
+
+  PARSED_PREVIOUS_EXISTS=""
+  PARSED_BACKUP_PATH=""
+  [[ -r "$LATEST_BACKUP_FILE" ]] || die "no FlareTuner backup metadata found at $LATEST_BACKUP_FILE"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == *=* ]] || die "invalid backup metadata line: $line"
+    key="${line%%=*}"
+    value="${line#*=}"
+
+    case "$key" in
+      PREVIOUS_EXISTS)
+        [[ "$seen_previous_exists" == "0" ]] || die "duplicate backup metadata key: PREVIOUS_EXISTS"
+        [[ "$value" == "0" || "$value" == "1" ]] || die "invalid backup metadata: PREVIOUS_EXISTS=$value"
+        PARSED_PREVIOUS_EXISTS="$value"
+        seen_previous_exists=1
+        ;;
+      BACKUP_PATH)
+        [[ "$seen_backup_path" == "0" ]] || die "duplicate backup metadata key: BACKUP_PATH"
+        metadata_path_is_safe "$value" || die "unsafe backup metadata path"
+        PARSED_BACKUP_PATH="$value"
+        seen_backup_path=1
+        ;;
+      *)
+        die "unknown backup metadata key: $key"
+        ;;
+    esac
+  done <"$LATEST_BACKUP_FILE"
+
+  [[ "$seen_previous_exists" == "1" ]] || die "backup metadata is missing PREVIOUS_EXISTS"
+  [[ "$seen_backup_path" == "1" ]] || die "backup metadata is missing BACKUP_PATH"
+}
+
+validate_backup_path() {
+  local backup_path="$1"
+
+  [[ -n "$backup_path" ]] || die "backup metadata is missing BACKUP_PATH"
+  metadata_path_is_safe "$backup_path" || die "unsafe backup metadata path"
+  case "$backup_path" in
+    "$BACKUP_DIR"/*)
+      ;;
+    *)
+      die "backup path is outside FlareTuner backup dir: $backup_path"
+      ;;
+  esac
+  [[ ! -L "$backup_path" ]] || die "backup file must not be a symlink: $backup_path"
+  [[ -f "$backup_path" && -r "$backup_path" ]] || die "backup file not found: $backup_path"
+}
+
 backup_managed_config() {
   local backup_path=""
 
@@ -142,18 +202,44 @@ backup_managed_config() {
   fi
 }
 
+restore_managed_config_from_metadata() {
+  load_backup_metadata
+
+  case "$PARSED_PREVIOUS_EXISTS" in
+    1)
+      validate_backup_path "$PARSED_BACKUP_PATH"
+      mkdir -p "$(dirname "$MANAGED_CONF")"
+      cp "$PARSED_BACKUP_PATH" "$MANAGED_CONF"
+      ;;
+    0)
+      [[ -z "$PARSED_BACKUP_PATH" ]] || die "backup metadata has BACKUP_PATH but PREVIOUS_EXISTS=0"
+      rm -f "$MANAGED_CONF"
+      ;;
+    *)
+      die "invalid backup metadata: PREVIOUS_EXISTS=$PARSED_PREVIOUS_EXISTS"
+      ;;
+  esac
+}
+
 verify_active_settings() {
   local active_cc active_qdisc
 
   active_cc="$(sysctl_get net.ipv4.tcp_congestion_control || true)"
   active_qdisc="$(sysctl_get net.core.default_qdisc || true)"
 
-  [[ "$active_cc" == "bbr" ]] || die "active congestion control is '$active_cc', expected 'bbr'"
-  [[ "$active_qdisc" == "fq" ]] || die "active default qdisc is '$active_qdisc', expected 'fq'"
+  if [[ "$active_cc" != "bbr" ]]; then
+    echo "Error: active congestion control is '$active_cc', expected 'bbr'" >&2
+    return 1
+  fi
+  if [[ "$active_qdisc" != "fq" ]]; then
+    echo "Error: active default qdisc is '$active_qdisc', expected 'fq'" >&2
+    return 1
+  fi
 }
 
 apply_config() {
   local config="$1"
+  local apply_status=0
 
   require_root
   require_supported_os
@@ -164,8 +250,19 @@ apply_config() {
   backup_managed_config
   mkdir -p "$(dirname "$MANAGED_CONF")"
   printf '%s\n' "$config" >"$MANAGED_CONF"
-  "$SYSCTL_CMD" --system
-  verify_active_settings
+  if ! "$SYSCTL_CMD" --system; then
+    apply_status=1
+  elif ! verify_active_settings; then
+    apply_status=1
+  fi
+
+  if [[ "$apply_status" != "0" ]]; then
+    echo "FlareTuner apply failed; restoring previous managed config." >&2
+    restore_managed_config_from_metadata
+    "$SYSCTL_CMD" --system || true
+    return 1
+  fi
+
   show_status
 }
 
@@ -434,31 +531,9 @@ run_generate_flow() {
 }
 
 restore_latest_backup() {
-  local PREVIOUS_EXISTS BACKUP_PATH
-
   require_root
-  [[ -r "$LATEST_BACKUP_FILE" ]] || die "no FlareTuner backup metadata found at $LATEST_BACKUP_FILE"
 
-  PREVIOUS_EXISTS=""
-  BACKUP_PATH=""
-  # shellcheck disable=SC1090
-  source "$LATEST_BACKUP_FILE"
-
-  case "$PREVIOUS_EXISTS" in
-    1)
-      [[ -n "$BACKUP_PATH" ]] || die "backup metadata is missing BACKUP_PATH"
-      [[ -r "$BACKUP_PATH" ]] || die "backup file not found: $BACKUP_PATH"
-      mkdir -p "$(dirname "$MANAGED_CONF")"
-      cp "$BACKUP_PATH" "$MANAGED_CONF"
-      ;;
-    0)
-      rm -f "$MANAGED_CONF"
-      ;;
-    *)
-      die "invalid backup metadata: PREVIOUS_EXISTS=$PREVIOUS_EXISTS"
-      ;;
-  esac
-
+  restore_managed_config_from_metadata
   "$SYSCTL_CMD" --system
   show_status
 }

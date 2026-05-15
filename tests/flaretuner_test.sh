@@ -47,6 +47,15 @@ assert_equals() {
   fi
 }
 
+assert_file_contains() {
+  local file="$1"
+  local needle="$2"
+  local label="$3"
+  local content
+  content="$(<"$file")"
+  assert_contains "$content" "$needle" "$label"
+}
+
 run_test() {
   local name="$1"
   shift
@@ -282,6 +291,382 @@ EOF
   fi
 }
 
+test_restore_previous_file_from_backup_dir() {
+  local root os_release etc_dir state_dir managed_conf backup_path
+  root="$TEST_TMP_DIR/restore-previous"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  backup_path="$state_dir/backup/99-flaretuner.conf.good.bak"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir/backup"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'new config\n' >"$managed_conf"
+  printf 'previous config\n' >"$backup_path"
+  {
+    printf 'PREVIOUS_EXISTS=1\n'
+    printf 'BACKUP_PATH=%s\n' "$backup_path"
+  } >"$state_dir/latest-backup.env"
+
+  sysctl() {
+    [[ "$1" == "--system" ]]
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  restore_latest_backup
+
+  assert_file_contains "$managed_conf" "previous config" "restore previous backup"
+}
+
+test_restore_rejects_shell_code_metadata_without_side_effects() {
+  local root os_release etc_dir state_dir managed_conf marker sysctl_marker
+  root="$TEST_TMP_DIR/restore-shell-code"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  marker="$root/executed"
+  sysctl_marker="$root/sysctl-ran"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'keep me\n' >"$managed_conf"
+  {
+    printf 'PREVIOUS_EXISTS=0\n'
+    printf 'BACKUP_PATH=\n'
+    printf 'EVIL=$(touch %s)\n' "$marker"
+  } >"$state_dir/latest-backup.env"
+
+  sysctl() {
+    printf 'ran\n' >"$sysctl_marker"
+    return 0
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( restore_latest_backup ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "restore should reject unknown shell-like metadata key"
+  fi
+  if [[ -e "$marker" ]]; then
+    fail "metadata shell code should not execute"
+  fi
+  if [[ -e "$sysctl_marker" ]]; then
+    fail "restore should not run sysctl for invalid metadata"
+  fi
+  assert_file_contains "$managed_conf" "keep me" "invalid metadata should not alter managed config"
+}
+
+test_restore_rejects_backup_path_outside_backup_dir() {
+  local root os_release etc_dir state_dir managed_conf outside_backup
+  root="$TEST_TMP_DIR/restore-outside"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  outside_backup="$root/outside.bak"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir/backup"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'keep me\n' >"$managed_conf"
+  printf 'outside\n' >"$outside_backup"
+  {
+    printf 'PREVIOUS_EXISTS=1\n'
+    printf 'BACKUP_PATH=%s\n' "$outside_backup"
+  } >"$state_dir/latest-backup.env"
+
+  sysctl() {
+    fail "restore should not run sysctl for outside backup path"
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( restore_latest_backup ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "restore should reject backup path outside backup dir"
+  fi
+  assert_file_contains "$managed_conf" "keep me" "outside backup should not alter managed config"
+}
+
+test_restore_rejects_missing_backup_file() {
+  local root os_release etc_dir state_dir managed_conf missing_backup
+  root="$TEST_TMP_DIR/restore-missing"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  missing_backup="$state_dir/backup/missing.bak"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir/backup"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'keep me\n' >"$managed_conf"
+  {
+    printf 'PREVIOUS_EXISTS=1\n'
+    printf 'BACKUP_PATH=%s\n' "$missing_backup"
+  } >"$state_dir/latest-backup.env"
+
+  sysctl() {
+    fail "restore should not run sysctl for missing backup file"
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( restore_latest_backup ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "restore should reject missing backup file"
+  fi
+  assert_file_contains "$managed_conf" "keep me" "missing backup should not alter managed config"
+}
+
+test_restore_rejects_symlink_backup_file() {
+  local root os_release etc_dir state_dir managed_conf real_backup symlink_backup
+  root="$TEST_TMP_DIR/restore-symlink"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  real_backup="$state_dir/backup/real.bak"
+  symlink_backup="$state_dir/backup/link.bak"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir/backup"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'keep me\n' >"$managed_conf"
+  printf 'backup\n' >"$real_backup"
+  ln -s "$real_backup" "$symlink_backup"
+  {
+    printf 'PREVIOUS_EXISTS=1\n'
+    printf 'BACKUP_PATH=%s\n' "$symlink_backup"
+  } >"$state_dir/latest-backup.env"
+
+  sysctl() {
+    fail "restore should not run sysctl for symlink backup file"
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( restore_latest_backup ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "restore should reject symlink backup file"
+  fi
+  assert_file_contains "$managed_conf" "keep me" "symlink backup should not alter managed config"
+}
+
+test_apply_restores_previous_file_when_sysctl_fails() {
+  local root os_release etc_dir state_dir managed_conf
+  root="$TEST_TMP_DIR/apply-failure"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'previous config\n' >"$managed_conf"
+
+  sysctl() {
+    if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_available_congestion_control" ]]; then
+      echo "reno cubic bbr"
+      return 0
+    fi
+    if [[ "$1" == "--system" ]]; then
+      return 1
+    fi
+    return 1
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  apply_config "$(render_config web 1g-4g 100m-500m balanced)" >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "apply should fail when sysctl --system fails"
+  fi
+  assert_file_contains "$managed_conf" "previous config" "apply failure should restore previous managed config"
+}
+
+test_apply_restores_previous_file_when_verification_fails() {
+  local root os_release etc_dir state_dir managed_conf
+  root="$TEST_TMP_DIR/apply-verification-failure"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'previous config\n' >"$managed_conf"
+
+  sysctl() {
+    if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_available_congestion_control" ]]; then
+      echo "reno cubic bbr"
+      return 0
+    fi
+    if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_congestion_control" ]]; then
+      echo "bbr"
+      return 0
+    fi
+    if [[ "$1" == "-n" && "$2" == "net.core.default_qdisc" ]]; then
+      echo "pfifo_fast"
+      return 0
+    fi
+    if [[ "$1" == "--system" ]]; then
+      return 0
+    fi
+    return 1
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( apply_config "$(render_config web 1g-4g 100m-500m balanced)" ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "apply should fail when active verification fails"
+  fi
+  assert_file_contains "$managed_conf" "previous config" "verification failure should restore previous managed config"
+}
+
 run_test "render low-memory conservative config" test_render_low_memory_config
 run_test "render high-throughput aggressive config" test_render_high_throughput_config
 run_test "detect supported Debian" test_supported_debian_detection
@@ -291,5 +676,12 @@ run_test "choose option handles EOF" test_choose_option_handles_eof
 run_test "preview does not load BBR" test_preview_does_not_load_bbr
 run_test "apply writes managed config and metadata" test_apply_writes_managed_config_and_metadata
 run_test "restore removes managed file when no previous file" test_restore_removes_managed_file_when_no_previous_file
+run_test "restore previous file from backup dir" test_restore_previous_file_from_backup_dir
+run_test "restore rejects shell code metadata without side effects" test_restore_rejects_shell_code_metadata_without_side_effects
+run_test "restore rejects backup path outside backup dir" test_restore_rejects_backup_path_outside_backup_dir
+run_test "restore rejects missing backup file" test_restore_rejects_missing_backup_file
+run_test "restore rejects symlink backup file" test_restore_rejects_symlink_backup_file
+run_test "apply restores previous file when sysctl fails" test_apply_restores_previous_file_when_sysctl_fails
+run_test "apply restores previous file when verification fails" test_apply_restores_previous_file_when_verification_fails
 
 echo "Passed $pass_count tests"
