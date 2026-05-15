@@ -11,13 +11,13 @@ cleanup() {
   rm -rf "$TEST_TMP_DIR"
   unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_ID_CMD
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
-  unset -f sysctl modprobe id 2>/dev/null || true
+  unset -f sysctl modprobe id select_profile_inputs 2>/dev/null || true
 }
 
 reset_test_env() {
   unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_ID_CMD
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
-  unset -f sysctl modprobe id 2>/dev/null || true
+  unset -f sysctl modprobe id select_profile_inputs 2>/dev/null || true
 }
 
 trap cleanup EXIT
