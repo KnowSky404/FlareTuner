@@ -9,17 +9,17 @@ TEST_TMP_DIR="$(mktemp -d)"
 
 cleanup() {
   rm -rf "$TEST_TMP_DIR"
-  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_ID_CMD
+  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD
   unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
-  unset -f sysctl modprobe id select_profile_inputs 2>/dev/null || true
+  unset -f sysctl modprobe lsmod id select_profile_inputs 2>/dev/null || true
 }
 
 reset_test_env() {
-  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_ID_CMD
+  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD
   unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
-  unset -f sysctl modprobe id select_profile_inputs 2>/dev/null || true
+  unset -f sysctl modprobe lsmod id select_profile_inputs 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -70,6 +70,8 @@ test_render_low_memory_config() {
   FLARETUNER_TESTING=1 source "$SCRIPT"
   local config
   config="$(render_config "low-memory" "under-512m" "under-100m" "conservative")"
+  assert_contains "$config" "# Managed by FlareTuner" "managed header"
+  assert_contains "$config" "# Restore with: sudo bash scripts/flaretuner.sh" "restore header"
   assert_contains "$config" "net.core.default_qdisc = fq" "baseline qdisc"
   assert_contains "$config" "net.ipv4.tcp_congestion_control = bbr" "baseline bbr"
   assert_contains "$config" "net.core.rmem_max = 4194304" "low memory rmem"
@@ -185,6 +187,103 @@ EOF
   output="$(run_generate_flow preview)"
   assert_contains "$output" "BBR available: no" "preview BBR status"
   assert_contains "$output" "# Managed by FlareTuner" "preview config"
+}
+
+test_status_reports_managed_config_backup_and_loaded_bbr() {
+  local root etc_dir state_dir managed_conf backup_file
+  root="$TEST_TMP_DIR/status"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  backup_file="$state_dir/backup/99-flaretuner.conf.test.bak"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir/backup"
+  printf 'managed\n' >"$managed_conf"
+  printf 'backup\n' >"$backup_file"
+  cat >"$state_dir/latest-backup.env" <<EOF
+PREVIOUS_EXISTS=1
+BACKUP_PATH=$backup_file
+EOF
+
+  sysctl() {
+    case "$1 $2" in
+      "-n net.ipv4.tcp_congestion_control")
+        echo "bbr"
+        return 0
+        ;;
+      "-n net.ipv4.tcp_available_congestion_control")
+        echo "reno cubic bbr"
+        return 0
+        ;;
+      "-n net.core.default_qdisc")
+        echo "fq"
+        return 0
+        ;;
+    esac
+    return 1
+  }
+
+  lsmod() {
+    echo "tcp_bbr 20480 0"
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_LSMOD_CMD=lsmod \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local output
+  output="$(show_status)"
+  assert_contains "$output" "tcp_bbr loaded: yes" "status loaded bbr"
+  assert_contains "$output" "Managed config: present ($managed_conf)" "status managed present"
+  assert_contains "$output" "Latest backup: $backup_file" "status latest backup"
+}
+
+test_status_reports_absent_managed_config_and_no_backup() {
+  local root etc_dir state_dir
+  root="$TEST_TMP_DIR/status-empty"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir"
+
+  sysctl() {
+    return 1
+  }
+
+  lsmod() {
+    return 0
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "1000"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_LSMOD_CMD=lsmod \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local output
+  output="$(show_status)"
+  assert_contains "$output" "Managed config: not installed ($etc_dir/sysctl.d/99-flaretuner.conf)" "status managed absent"
+  assert_contains "$output" "Latest backup: none" "status no backup"
 }
 
 test_apply_writes_managed_config_and_metadata() {
@@ -729,6 +828,8 @@ run_test "detect unsupported Alpine" test_unsupported_alpine_detection
 run_test "detect BBR availability" test_bbr_available_from_sysctl_output
 run_test "choose option handles EOF" test_choose_option_handles_eof
 run_test "preview does not load BBR" test_preview_does_not_load_bbr
+run_test "status reports managed config backup and loaded BBR" test_status_reports_managed_config_backup_and_loaded_bbr
+run_test "status reports absent managed config and no backup" test_status_reports_absent_managed_config_and_no_backup
 run_test "apply writes managed config and metadata" test_apply_writes_managed_config_and_metadata
 run_test "restore removes managed file when no previous file" test_restore_removes_managed_file_when_no_previous_file
 run_test "restore previous file from backup dir" test_restore_previous_file_from_backup_dir

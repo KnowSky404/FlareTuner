@@ -103,6 +103,10 @@ bbr_available() {
   [[ " $controls " == *" bbr "* ]]
 }
 
+tcp_bbr_loaded() {
+  "$LSMOD_CMD" 2>/dev/null | awk '{print $1}' | grep -qx 'tcp_bbr'
+}
+
 try_load_bbr() {
   bbr_available && return 0
   is_root || return 1
@@ -291,11 +295,25 @@ show_status() {
   echo "Root: $(is_root && printf 'yes' || printf 'no')"
   echo "Supported OS: $(is_supported_os && printf 'yes' || printf 'no')"
   echo "BBR available: $(bbr_available && printf 'yes' || printf 'no')"
+  echo "tcp_bbr loaded: $(tcp_bbr_loaded && printf 'yes' || printf 'no')"
   echo "Current congestion control: $current_cc"
   echo "Available congestion controls: $available_cc"
   echo "Default qdisc: $default_qdisc"
-  echo "Managed config: $MANAGED_CONF"
-  echo "Latest backup: $LATEST_BACKUP_FILE"
+  if [[ -f "$MANAGED_CONF" ]]; then
+    echo "Managed config: present ($MANAGED_CONF)"
+  else
+    echo "Managed config: not installed ($MANAGED_CONF)"
+  fi
+  if [[ -f "$LATEST_BACKUP_FILE" ]]; then
+    load_backup_metadata
+    if [[ "$PARSED_PREVIOUS_EXISTS" == "1" ]]; then
+      echo "Latest backup: $PARSED_BACKUP_PATH"
+    else
+      echo "Latest backup: none (previous state had no managed config)"
+    fi
+  else
+    echo "Latest backup: none"
+  fi
 }
 
 profile_values() {
@@ -434,6 +452,7 @@ render_config() {
 
   cat <<EOF
 # Managed by FlareTuner $VERSION
+# Restore with: sudo bash scripts/flaretuner.sh, then choose the restore menu.
 # Workload: $workload
 # Memory tier: $memory
 # Bandwidth tier: $bandwidth
