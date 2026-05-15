@@ -58,7 +58,64 @@ test_render_high_throughput_config() {
   assert_contains "$config" "net.core.wmem_max = 67108864" "high throughput wmem"
 }
 
+test_supported_debian_detection() {
+  local os_release
+  os_release="$(mktemp)"
+  cat >"$os_release" <<'EOF'
+ID=debian
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+EOF
+
+  FLARETUNER_TESTING=1 FLARETUNER_OS_RELEASE="$os_release" source "$SCRIPT"
+
+  assert_equals "$(os_id)" "debian" "debian os id"
+  if ! is_supported_os; then
+    fail "debian should be supported"
+  fi
+
+  rm -f "$os_release"
+}
+
+test_unsupported_alpine_detection() {
+  local os_release
+  os_release="$(mktemp)"
+  cat >"$os_release" <<'EOF'
+ID=alpine
+PRETTY_NAME="Alpine Linux"
+EOF
+
+  FLARETUNER_TESTING=1 FLARETUNER_OS_RELEASE="$os_release" source "$SCRIPT"
+
+  assert_equals "$(os_id)" "alpine" "alpine os id"
+  if is_supported_os; then
+    fail "alpine should not be supported"
+  fi
+
+  rm -f "$os_release"
+}
+
+test_bbr_available_from_sysctl_output() {
+  sysctl() {
+    if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_available_congestion_control" ]]; then
+      echo "reno cubic bbr"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 FLARETUNER_SYSCTL_CMD=sysctl source "$SCRIPT"
+
+  if ! bbr_available; then
+    fail "bbr should be available"
+  fi
+
+  unset -f sysctl
+}
+
 run_test "render low-memory conservative config" test_render_low_memory_config
 run_test "render high-throughput aggressive config" test_render_high_throughput_config
+run_test "detect supported Debian" test_supported_debian_detection
+run_test "detect unsupported Alpine" test_unsupported_alpine_detection
+run_test "detect BBR availability" test_bbr_available_from_sysctl_output
 
 echo "Passed $pass_count tests"
