@@ -27,13 +27,13 @@ Run the interactive menu:
 bash scripts/flaretuner.sh
 ```
 
-Apply mode requires root privileges:
+Apply and restore require root privileges because they write or remove the managed sysctl file and reload sysctl settings:
 
 ```bash
 sudo bash scripts/flaretuner.sh
 ```
 
-The menu can preview tuning, apply tuning, restore the latest FlareTuner backup, or show current network tuning status.
+Preview and status can run without root. The menu can preview tuning, apply tuning, restore the latest FlareTuner backup, or show current network tuning status.
 
 ## Safety
 
@@ -52,6 +52,8 @@ Backup metadata and backups are stored under:
 ```
 
 The restore menu restores the latest FlareTuner-managed backup. If no previous managed file existed, restore removes the managed file. Apply failures trigger restoration of the previous managed file when possible.
+
+Apply and restore run `sysctl --system`, which reloads system sysctl configuration broadly. FlareTuner still only writes, restores, or removes its managed file.
 
 ## Tuning Rules
 

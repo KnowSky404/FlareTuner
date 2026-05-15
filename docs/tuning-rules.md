@@ -24,7 +24,9 @@ net.ipv4.tcp_congestion_control = bbr
 
 ## Memory Safety
 
-Low-memory systems can become unstable if socket buffer ceilings are raised too far. FlareTuner caps receive and send buffer limits on small memory tiers, and the `low-memory` workload overrides other inputs with smaller bounded values for buffers, connection queues, and network device backlog.
+Low-memory systems can become unstable if socket buffer ceilings are raised too far. Memory tier selection sets the starting receive and send buffer limits, but later bandwidth and workload choices can raise those limits for throughput-oriented profiles.
+
+The `low-memory` workload is the safety override that runs after the other inputs. It enforces smaller bounded values for buffers, connection queues, and network device backlog.
 
 ## Workload Behavior
 
