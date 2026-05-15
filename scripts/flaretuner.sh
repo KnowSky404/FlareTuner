@@ -175,6 +175,7 @@ load_backup_metadata() {
 
 validate_backup_path() {
   local backup_path="$1"
+  local canonical_backup_dir canonical_backup_path
 
   [[ -n "$backup_path" ]] || die "backup metadata is missing BACKUP_PATH"
   metadata_path_is_safe "$backup_path" || die "unsafe backup metadata path"
@@ -187,6 +188,16 @@ validate_backup_path() {
   esac
   [[ ! -L "$backup_path" ]] || die "backup file must not be a symlink: $backup_path"
   [[ -f "$backup_path" && -r "$backup_path" ]] || die "backup file not found: $backup_path"
+
+  canonical_backup_dir="$(readlink -f "$BACKUP_DIR")" || die "cannot canonicalize backup dir: $BACKUP_DIR"
+  canonical_backup_path="$(readlink -f "$backup_path")" || die "cannot canonicalize backup path: $backup_path"
+  case "$canonical_backup_path" in
+    "$canonical_backup_dir"/*)
+      ;;
+    *)
+      die "backup path escapes FlareTuner backup dir: $backup_path"
+      ;;
+  esac
 }
 
 backup_managed_config() {

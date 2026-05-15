@@ -553,6 +553,61 @@ EOF
   assert_file_contains "$managed_conf" "keep me" "symlink backup should not alter managed config"
 }
 
+test_restore_rejects_symlink_parent_directory_escape() {
+  local root os_release etc_dir state_dir managed_conf outside_dir escaped_backup symlink_dir
+  root="$TEST_TMP_DIR/restore-symlink-dir"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  outside_dir="$root/outside"
+  escaped_backup="$state_dir/backup/linkdir/evil.bak"
+  symlink_dir="$state_dir/backup/linkdir"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir/backup" "$outside_dir"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'keep me\n' >"$managed_conf"
+  printf 'escaped backup\n' >"$outside_dir/evil.bak"
+  ln -s "$outside_dir" "$symlink_dir"
+  {
+    printf 'PREVIOUS_EXISTS=1\n'
+    printf 'BACKUP_PATH=%s\n' "$escaped_backup"
+  } >"$state_dir/latest-backup.env"
+
+  sysctl() {
+    fail "restore should not run sysctl for symlinked backup parent directory"
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( restore_latest_backup ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "restore should reject symlinked backup parent directory"
+  fi
+  assert_file_contains "$managed_conf" "keep me" "symlinked parent should not alter managed config"
+}
+
 test_apply_restores_previous_file_when_sysctl_fails() {
   local root os_release etc_dir state_dir managed_conf
   root="$TEST_TMP_DIR/apply-failure"
@@ -681,6 +736,7 @@ run_test "restore rejects shell code metadata without side effects" test_restore
 run_test "restore rejects backup path outside backup dir" test_restore_rejects_backup_path_outside_backup_dir
 run_test "restore rejects missing backup file" test_restore_rejects_missing_backup_file
 run_test "restore rejects symlink backup file" test_restore_rejects_symlink_backup_file
+run_test "restore rejects symlink parent directory escape" test_restore_rejects_symlink_parent_directory_escape
 run_test "apply restores previous file when sysctl fails" test_apply_restores_previous_file_when_sysctl_fails
 run_test "apply restores previous file when verification fails" test_apply_restores_previous_file_when_verification_fails
 
