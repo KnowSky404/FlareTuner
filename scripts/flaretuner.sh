@@ -114,6 +114,61 @@ try_load_bbr() {
   return 1
 }
 
+timestamp() {
+  date +%Y%m%d%H%M%S
+}
+
+write_latest_backup_metadata() {
+  local previous_exists="$1"
+  local backup_path="$2"
+
+  mkdir -p "$STATE_DIR"
+  {
+    printf 'PREVIOUS_EXISTS=%s\n' "$previous_exists"
+    printf 'BACKUP_PATH=%s\n' "$backup_path"
+  } >"$LATEST_BACKUP_FILE"
+}
+
+backup_managed_config() {
+  local backup_path=""
+
+  mkdir -p "$BACKUP_DIR"
+  if [[ -e "$MANAGED_CONF" ]]; then
+    backup_path="$BACKUP_DIR/99-flaretuner.conf.$(timestamp).bak"
+    cp "$MANAGED_CONF" "$backup_path"
+    write_latest_backup_metadata 1 "$backup_path"
+  else
+    write_latest_backup_metadata 0 ""
+  fi
+}
+
+verify_active_settings() {
+  local active_cc active_qdisc
+
+  active_cc="$(sysctl_get net.ipv4.tcp_congestion_control || true)"
+  active_qdisc="$(sysctl_get net.core.default_qdisc || true)"
+
+  [[ "$active_cc" == "bbr" ]] || die "active congestion control is '$active_cc', expected 'bbr'"
+  [[ "$active_qdisc" == "fq" ]] || die "active default qdisc is '$active_qdisc', expected 'fq'"
+}
+
+apply_config() {
+  local config="$1"
+
+  require_root
+  require_supported_os
+  if ! try_load_bbr; then
+    die "BBR is not available on this kernel"
+  fi
+
+  backup_managed_config
+  mkdir -p "$(dirname "$MANAGED_CONF")"
+  printf '%s\n' "$config" >"$MANAGED_CONF"
+  "$SYSCTL_CMD" --system
+  verify_active_settings
+  show_status
+}
+
 show_status() {
   local current_cc available_cc default_qdisc kernel
 
@@ -337,15 +392,13 @@ explain_config() {
 
 run_generate_flow() {
   local mode="${1:-preview}"
+  local config confirmation
 
   require_supported_os
 
   case "$mode" in
     apply)
       require_root
-      if ! try_load_bbr; then
-        die "BBR is not available on this kernel"
-      fi
       ;;
     preview)
       echo "BBR available: $(bbr_available && printf 'yes' || printf 'no')"
@@ -356,14 +409,24 @@ run_generate_flow() {
   esac
 
   select_profile_inputs || return 1
-  explain_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE"
+  config="$(render_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE")"
+  show_status
   echo
-  render_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE"
+  printf '%s\n' "$config"
+  echo
+  explain_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE"
 
   case "$mode" in
     apply)
       echo
-      echo "Apply is not implemented yet."
+      if ! read_input "Type yes to apply this configuration: " confirmation; then
+        return 1
+      fi
+      if [[ "$confirmation" != "yes" ]]; then
+        echo "Apply cancelled."
+        return 1
+      fi
+      apply_config "$config"
       ;;
     preview)
       ;;
@@ -371,7 +434,33 @@ run_generate_flow() {
 }
 
 restore_latest_backup() {
-  echo "Restore is not implemented yet."
+  local PREVIOUS_EXISTS BACKUP_PATH
+
+  require_root
+  [[ -r "$LATEST_BACKUP_FILE" ]] || die "no FlareTuner backup metadata found at $LATEST_BACKUP_FILE"
+
+  PREVIOUS_EXISTS=""
+  BACKUP_PATH=""
+  # shellcheck disable=SC1090
+  source "$LATEST_BACKUP_FILE"
+
+  case "$PREVIOUS_EXISTS" in
+    1)
+      [[ -n "$BACKUP_PATH" ]] || die "backup metadata is missing BACKUP_PATH"
+      [[ -r "$BACKUP_PATH" ]] || die "backup file not found: $BACKUP_PATH"
+      mkdir -p "$(dirname "$MANAGED_CONF")"
+      cp "$BACKUP_PATH" "$MANAGED_CONF"
+      ;;
+    0)
+      rm -f "$MANAGED_CONF"
+      ;;
+    *)
+      die "invalid backup metadata: PREVIOUS_EXISTS=$PREVIOUS_EXISTS"
+      ;;
+  esac
+
+  "$SYSCTL_CMD" --system
+  show_status
 }
 
 main() {

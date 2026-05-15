@@ -10,12 +10,14 @@ TEST_TMP_DIR="$(mktemp -d)"
 cleanup() {
   rm -rf "$TEST_TMP_DIR"
   unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_ID_CMD
+  unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
   unset -f sysctl modprobe id select_profile_inputs 2>/dev/null || true
 }
 
 reset_test_env() {
   unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_ID_CMD
+  unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
   unset -f sysctl modprobe id select_profile_inputs 2>/dev/null || true
 }
@@ -176,6 +178,110 @@ EOF
   assert_contains "$output" "# Managed by FlareTuner" "preview config"
 }
 
+test_apply_writes_managed_config_and_metadata() {
+  local root os_release etc_dir state_dir
+  root="$TEST_TMP_DIR/apply"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+
+  sysctl() {
+    if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_available_congestion_control" ]]; then
+      echo "reno cubic bbr"
+      return 0
+    fi
+    if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_congestion_control" ]]; then
+      echo "bbr"
+      return 0
+    fi
+    if [[ "$1" == "-n" && "$2" == "net.core.default_qdisc" ]]; then
+      echo "fq"
+      return 0
+    fi
+    if [[ "$1" == "--system" ]]; then
+      return 0
+    fi
+    return 1
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  apply_config "$(render_config web 1g-4g 100m-500m balanced)"
+
+  local managed_content metadata
+  managed_content="$(<"$etc_dir/sysctl.d/99-flaretuner.conf")"
+  metadata="$(<"$state_dir/latest-backup.env")"
+  assert_contains "$managed_content" "net.ipv4.tcp_congestion_control = bbr" "managed config bbr"
+  assert_contains "$metadata" "PREVIOUS_EXISTS=0" "backup metadata previous missing"
+}
+
+test_restore_removes_managed_file_when_no_previous_file() {
+  local root os_release etc_dir state_dir managed_conf
+  root="$TEST_TMP_DIR/restore"
+  os_release="$root/os-release"
+  etc_dir="$root/etc"
+  state_dir="$root/state"
+  managed_conf="$etc_dir/sysctl.d/99-flaretuner.conf"
+  mkdir -p "$etc_dir/sysctl.d" "$state_dir"
+  cat >"$os_release" <<'EOF'
+ID=ubuntu
+PRETTY_NAME="Ubuntu 24.04 LTS"
+EOF
+  printf 'net.ipv4.tcp_congestion_control = bbr\n' >"$managed_conf"
+  cat >"$state_dir/latest-backup.env" <<'EOF'
+PREVIOUS_EXISTS=0
+BACKUP_PATH=
+EOF
+
+  sysctl() {
+    if [[ "$1" == "--system" ]]; then
+      return 0
+    fi
+    return 0
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_OS_RELEASE="$os_release" \
+    FLARETUNER_ETC_DIR="$etc_dir" \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_SYSCTL_CMD=sysctl \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  restore_latest_backup
+
+  if [[ -e "$managed_conf" ]]; then
+    fail "managed config should be removed when no previous file existed"
+  fi
+}
+
 run_test "render low-memory conservative config" test_render_low_memory_config
 run_test "render high-throughput aggressive config" test_render_high_throughput_config
 run_test "detect supported Debian" test_supported_debian_detection
@@ -183,5 +289,7 @@ run_test "detect unsupported Alpine" test_unsupported_alpine_detection
 run_test "detect BBR availability" test_bbr_available_from_sysctl_output
 run_test "choose option handles EOF" test_choose_option_handles_eof
 run_test "preview does not load BBR" test_preview_does_not_load_bbr
+run_test "apply writes managed config and metadata" test_apply_writes_managed_config_and_metadata
+run_test "restore removes managed file when no previous file" test_restore_removes_managed_file_when_no_previous_file
 
 echo "Passed $pass_count tests"
