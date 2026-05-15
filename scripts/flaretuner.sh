@@ -79,6 +79,19 @@ require_root() {
   fi
 }
 
+read_input() {
+  local prompt="$1"
+  local target_var="$2"
+  local value
+
+  if ! IFS= read -r -p "$prompt" value; then
+    echo "Input ended; aborting." >&2
+    return 1
+  fi
+
+  printf -v "$target_var" '%s' "$value"
+}
+
 sysctl_get() {
   local key="$1"
   "$SYSCTL_CMD" -n "$key" 2>/dev/null
@@ -92,6 +105,7 @@ bbr_available() {
 
 try_load_bbr() {
   bbr_available && return 0
+  is_root || return 1
 
   if "$MODPROBE_CMD" tcp_bbr 2>/dev/null; then
     bbr_available && return 0
@@ -289,7 +303,9 @@ choose_option() {
       echo "  $index) $option" >&2
       index=$((index + 1))
     done
-    read -r -p "Choose [1-${#options[@]}]: " choice
+    if ! read_input "Choose [1-${#options[@]}]: " choice; then
+      return 1
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
       printf '%s\n' "${options[$((choice - 1))]}"
       return 0
@@ -299,10 +315,10 @@ choose_option() {
 }
 
 select_profile_inputs() {
-  SELECTED_WORKLOAD="$(choose_option "Workload" web proxy download low-memory)"
-  SELECTED_MEMORY="$(choose_option "Memory tier" under-512m 512m-1g 1g-4g 4g-plus)"
-  SELECTED_BANDWIDTH="$(choose_option "Bandwidth tier" under-100m 100m-500m 500m-1g 1g-plus)"
-  SELECTED_PROFILE="$(choose_option "Tuning profile" conservative balanced aggressive)"
+  SELECTED_WORKLOAD="$(choose_option "Workload" web proxy download low-memory)" || return 1
+  SELECTED_MEMORY="$(choose_option "Memory tier" under-512m 512m-1g 1g-4g 4g-plus)" || return 1
+  SELECTED_BANDWIDTH="$(choose_option "Bandwidth tier" under-100m 100m-500m 500m-1g 1g-plus)" || return 1
+  SELECTED_PROFILE="$(choose_option "Tuning profile" conservative balanced aggressive)" || return 1
 }
 
 explain_config() {
@@ -323,11 +339,23 @@ run_generate_flow() {
   local mode="${1:-preview}"
 
   require_supported_os
-  if ! try_load_bbr; then
-    die "BBR is not available on this kernel"
-  fi
 
-  select_profile_inputs
+  case "$mode" in
+    apply)
+      require_root
+      if ! try_load_bbr; then
+        die "BBR is not available on this kernel"
+      fi
+      ;;
+    preview)
+      echo "BBR available: $(bbr_available && printf 'yes' || printf 'no')"
+      ;;
+    *)
+      die "unknown generate mode: $mode"
+      ;;
+  esac
+
+  select_profile_inputs || return 1
   explain_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE"
   echo
   render_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE"
@@ -338,9 +366,6 @@ run_generate_flow() {
       echo "Apply is not implemented yet."
       ;;
     preview)
-      ;;
-    *)
-      die "unknown generate mode: $mode"
       ;;
   esac
 }
@@ -361,13 +386,19 @@ main() {
     echo "5) Exit"
 
     local choice
-    read -r -p "Choose [1-5]: " choice
+    if ! read_input "Choose [1-5]: " choice; then
+      return 0
+    fi
     case "$choice" in
       1)
-        run_generate_flow apply
+        if ! run_generate_flow apply; then
+          echo "Operation cancelled."
+        fi
         ;;
       2)
-        run_generate_flow preview
+        if ! run_generate_flow preview; then
+          echo "Operation cancelled."
+        fi
         ;;
       3)
         restore_latest_backup
