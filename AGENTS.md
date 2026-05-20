@@ -12,6 +12,7 @@ Primary files:
 - `tests/flaretuner_test.sh` - Bash test runner using environment overrides and temp dirs.
 - `docs/tuning-rules.md` - tuning inputs, safety rules, workload behavior, and rollback model.
 - `README.md` - user-facing scope, usage, and safety notes.
+- `skills/flaretuner/SKILL.md` - repo-local skill for agents working on FlareTuner behavior, docs, tests, or release workflow.
 
 ## Hard Product Boundaries
 
@@ -47,6 +48,7 @@ Primary files:
 ## Implementation Style
 
 - Keep the project simple: Bash, Markdown, and focused shell tests.
+- Agents that support repo-local skills should load `skills/flaretuner/SKILL.md` before modifying project behavior, documentation, tests, or release workflow.
 - Prefer using Superpowers skills for architecture discussion, implementation planning, feature development, debugging, testing strategy, and completion verification whenever the available task matches a Superpowers workflow.
 - For larger or ambiguous changes, generate or update a written plan before editing code. Keep plans in `docs/superpowers/plans/` when they are meant to be reused by future agents.
 - For new behavior or bug fixes, prefer a test-first or regression-test-first workflow when practical.
@@ -67,6 +69,7 @@ fi
 ## Git And Commit Discipline
 
 - Prefer small, atomic commits that each represent one coherent change.
+- After completing requested modifications, create an atomic commit for the completed work unless the user explicitly asks not to commit.
 - Do not mix unrelated refactors, formatting churn, generated files, and behavior changes in the same commit.
 - Before committing, inspect the diff and stage only files that belong to the intended change.
 - Commit messages should describe the behavior or documentation change, not the mechanics of editing.

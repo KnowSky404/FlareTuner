@@ -1,0 +1,4 @@
+interface:
+  display_name: "FlareTuner"
+  short_description: "Work safely on the FlareTuner Bash tuning script"
+  default_prompt: "Use this skill when modifying or reviewing FlareTuner behavior, docs, tests, or release workflow."

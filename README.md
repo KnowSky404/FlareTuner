@@ -29,6 +29,7 @@ Non-goals for this MVP:
 - `tests/flaretuner_test.sh` - shell tests using environment overrides and temp directories.
 - `docs/tuning-rules.md` - detailed tuning inputs, generated settings, safety rules, and rollback model.
 - `AGENTS.md` - working instructions for Codex, Hermes-style agents, and other AI coding agents.
+- `skills/flaretuner/` - project skill for agents that can load repo-local skills.
 - `docs/superpowers/specs/` - project specs for larger changes.
 - `docs/superpowers/plans/` - implementation plans that future agents can reuse.
 
@@ -105,6 +106,7 @@ AI coding agents should start with [AGENTS.md](AGENTS.md). It is the authoritati
 For Codex, Hermes-style agents, or other agents that support reusable skills:
 
 - Use the repo-level `AGENTS.md` before making changes.
+- Load `skills/flaretuner/SKILL.md` when working on FlareTuner behavior, docs, tests, or release workflow.
 - Treat `scripts/flaretuner.sh` as the source of truth for runtime behavior.
 - Treat `docs/tuning-rules.md` as the source of truth for tuning semantics and rollback behavior.
 - Keep this README aligned with user-visible behavior.
