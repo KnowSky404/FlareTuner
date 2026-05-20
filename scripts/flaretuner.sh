@@ -8,12 +8,16 @@ MANAGED_CONF="${FLARETUNER_MANAGED_CONF:-${FLARETUNER_ETC_DIR:-/etc}/sysctl.d/99
 STATE_DIR="${FLARETUNER_STATE_DIR:-/var/lib/flaretuner}"
 BACKUP_DIR="$STATE_DIR/backup"
 LATEST_BACKUP_FILE="$STATE_DIR/latest-backup.env"
+TC_LIMIT_FILE="$STATE_DIR/tc-limit.env"
 OS_RELEASE_FILE="${FLARETUNER_OS_RELEASE:-/etc/os-release}"
 SYSCTL_CMD="${FLARETUNER_SYSCTL_CMD:-sysctl}"
 MODPROBE_CMD="${FLARETUNER_MODPROBE_CMD:-modprobe}"
 LSMOD_CMD="${FLARETUNER_LSMOD_CMD:-lsmod}"
 UNAME_CMD="${FLARETUNER_UNAME_CMD:-uname}"
 ID_CMD="${FLARETUNER_ID_CMD:-id}"
+MEMINFO_FILE="${FLARETUNER_MEMINFO:-/proc/meminfo}"
+NET_CLASS_DIR="${FLARETUNER_NET_CLASS_DIR:-/sys/class/net}"
+TC_CMD="${FLARETUNER_TC_CMD:-tc}"
 
 die() {
   echo "Error: $*" >&2
@@ -82,14 +86,14 @@ require_root() {
 read_input() {
   local prompt="$1"
   local target_var="$2"
-  local value
+  local input_value
 
-  if ! IFS= read -r -p "$prompt" value; then
+  if ! IFS= read -r -p "$prompt" input_value; then
     echo "Input ended; aborting." >&2
     return 1
   fi
 
-  printf -v "$target_var" '%s' "$value"
+  printf -v "$target_var" '%s' "$input_value"
 }
 
 sysctl_get() {
@@ -314,6 +318,99 @@ show_status() {
   else
     echo "Latest backup: none"
   fi
+  if [[ -f "$TC_LIMIT_FILE" ]]; then
+    load_tc_limit_metadata
+    echo "TC egress limit: ${PARSED_TC_IFACE} at ${PARSED_TC_RATE_MBPS} Mbps"
+  else
+    echo "TC egress limit: none"
+  fi
+}
+
+validate_iface_name() {
+  local iface="$1"
+
+  [[ "$iface" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 1
+  [[ "$iface" != *".."* ]] || return 1
+  [[ "$iface" != "." && "$iface" != "-" && "$iface" != ":" ]]
+}
+
+validate_positive_mbps() {
+  local mbps="$1"
+
+  [[ "$mbps" =~ ^[0-9]+$ ]] || return 1
+  (( mbps > 0 ))
+}
+
+write_tc_limit_metadata() {
+  local iface="$1"
+  local rate_mbps="$2"
+
+  mkdir -p "$STATE_DIR"
+  {
+    printf 'IFACE=%s\n' "$iface"
+    printf 'RATE_MBPS=%s\n' "$rate_mbps"
+  } >"$TC_LIMIT_FILE"
+}
+
+load_tc_limit_metadata() {
+  local line key value
+  local seen_iface=0
+  local seen_rate=0
+
+  PARSED_TC_IFACE=""
+  PARSED_TC_RATE_MBPS=""
+  [[ -r "$TC_LIMIT_FILE" ]] || die "no FlareTuner tc limit metadata found at $TC_LIMIT_FILE"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == *=* ]] || die "invalid tc metadata line: $line"
+    key="${line%%=*}"
+    value="${line#*=}"
+
+    case "$key" in
+      IFACE)
+        [[ "$seen_iface" == "0" ]] || die "duplicate tc metadata key: IFACE"
+        validate_iface_name "$value" || die "invalid tc metadata interface: $value"
+        PARSED_TC_IFACE="$value"
+        seen_iface=1
+        ;;
+      RATE_MBPS)
+        [[ "$seen_rate" == "0" ]] || die "duplicate tc metadata key: RATE_MBPS"
+        validate_positive_mbps "$value" || die "invalid tc metadata rate: $value"
+        PARSED_TC_RATE_MBPS="$value"
+        seen_rate=1
+        ;;
+      *)
+        die "unknown tc metadata key: $key"
+        ;;
+    esac
+  done <"$TC_LIMIT_FILE"
+
+  [[ "$seen_iface" == "1" ]] || die "tc metadata is missing IFACE"
+  [[ "$seen_rate" == "1" ]] || die "tc metadata is missing RATE_MBPS"
+}
+
+apply_tc_egress_limit() {
+  local iface="$1"
+  local rate_mbps="$2"
+
+  require_root
+  validate_iface_name "$iface" || die "invalid interface name: $iface"
+  validate_positive_mbps "$rate_mbps" || die "target bandwidth must be a positive integer Mbps value"
+
+  "$TC_CMD" qdisc replace dev "$iface" root handle 1: htb default 10
+  "$TC_CMD" class replace dev "$iface" parent 1: classid 1:10 htb rate "${rate_mbps}mbit" ceil "${rate_mbps}mbit"
+  "$TC_CMD" qdisc replace dev "$iface" parent 1:10 handle 10: fq
+  write_tc_limit_metadata "$iface" "$rate_mbps"
+  echo "Applied tc egress limit: $iface at $rate_mbps Mbps"
+}
+
+clear_tc_egress_limit() {
+  require_root
+  load_tc_limit_metadata
+
+  "$TC_CMD" qdisc del dev "$PARSED_TC_IFACE" root
+  rm -f "$TC_LIMIT_FILE"
+  echo "Cleared tc egress limit: $PARSED_TC_IFACE"
 }
 
 profile_values() {
@@ -321,6 +418,7 @@ profile_values() {
   local memory="$2"
   local bandwidth="$3"
   local profile="$4"
+  local path_profile="${5:-normal}"
 
   SOMAXCONN=2048
   SYN_BACKLOG=2048
@@ -440,6 +538,31 @@ profile_values() {
       die "unknown tuning profile: $profile"
       ;;
   esac
+
+  case "$path_profile" in
+    normal)
+      ;;
+    high-latency)
+      if [[ "$workload" != "low-memory" && "$memory" != "under-512m" ]]; then
+        RMEM_MAX=$(( RMEM_MAX < 33554432 ? 33554432 : RMEM_MAX ))
+        WMEM_MAX=$(( WMEM_MAX < 33554432 ? 33554432 : WMEM_MAX ))
+        TCP_RMEM="4096 87380 $RMEM_MAX"
+        TCP_WMEM="4096 65536 $WMEM_MAX"
+      fi
+      ;;
+    qos-sensitive)
+      RMEM_MAX=$(( RMEM_MAX > 16777216 ? 16777216 : RMEM_MAX ))
+      WMEM_MAX=$(( WMEM_MAX > 16777216 ? 16777216 : WMEM_MAX ))
+      TCP_RMEM="4096 87380 $RMEM_MAX"
+      TCP_WMEM="4096 65536 $WMEM_MAX"
+      SOMAXCONN=$(( SOMAXCONN > 4096 ? 4096 : SOMAXCONN ))
+      SYN_BACKLOG=$(( SYN_BACKLOG > 4096 ? 4096 : SYN_BACKLOG ))
+      NETDEV_BACKLOG=$(( NETDEV_BACKLOG > 5000 ? 5000 : NETDEV_BACKLOG ))
+      ;;
+    *)
+      die "unknown path profile: $path_profile"
+      ;;
+  esac
 }
 
 render_config() {
@@ -447,8 +570,10 @@ render_config() {
   local memory="$2"
   local bandwidth="$3"
   local profile="$4"
+  local path_profile="${5:-normal}"
+  local target_mbps="${6:-auto}"
 
-  profile_values "$workload" "$memory" "$bandwidth" "$profile"
+  profile_values "$workload" "$memory" "$bandwidth" "$profile" "$path_profile"
 
   cat <<EOF
 # Managed by FlareTuner $VERSION
@@ -457,6 +582,8 @@ render_config() {
 # Memory tier: $memory
 # Bandwidth tier: $bandwidth
 # Profile: $profile
+# Path profile: $path_profile
+# Target bandwidth Mbps: $target_mbps
 
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -496,11 +623,176 @@ choose_option() {
   done
 }
 
+detect_memory_tier() {
+  local mem_kb=""
+
+  if [[ -r "$MEMINFO_FILE" ]]; then
+    while read -r key value _unit; do
+      if [[ "$key" == "MemTotal:" && "$value" =~ ^[0-9]+$ ]]; then
+        mem_kb="$value"
+        break
+      fi
+    done <"$MEMINFO_FILE"
+  fi
+
+  if [[ -z "$mem_kb" ]]; then
+    printf '512m-1g\n'
+  elif (( mem_kb < 524288 )); then
+    printf 'under-512m\n'
+  elif (( mem_kb < 1048576 )); then
+    printf '512m-1g\n'
+  elif (( mem_kb < 4194304 )); then
+    printf '1g-4g\n'
+  else
+    printf '4g-plus\n'
+  fi
+}
+
+detect_bandwidth_tier() {
+  local iface speed max_speed=0
+
+  if [[ -d "$NET_CLASS_DIR" ]]; then
+    for iface in "$NET_CLASS_DIR"/*; do
+      [[ -d "$iface" ]] || continue
+      [[ "$(basename "$iface")" != "lo" ]] || continue
+      [[ -r "$iface/speed" ]] || continue
+      read -r speed <"$iface/speed" || speed=""
+      [[ "$speed" =~ ^[0-9]+$ ]] || continue
+      (( speed > max_speed )) && max_speed="$speed"
+    done
+  fi
+
+  if (( max_speed >= 1000 )); then
+    printf '1g-plus\n'
+  elif (( max_speed >= 500 )); then
+    printf '500m-1g\n'
+  elif (( max_speed >= 100 )); then
+    printf '100m-500m\n'
+  else
+    printf 'under-100m\n'
+  fi
+}
+
+bandwidth_tier_from_mbps() {
+  local mbps="$1"
+
+  [[ "$mbps" =~ ^[0-9]+$ ]] || die "target bandwidth must be a positive integer Mbps value"
+  (( mbps > 0 )) || die "target bandwidth must be greater than 0 Mbps"
+
+  if (( mbps >= 1000 )); then
+    printf '1g-plus\n'
+  elif (( mbps >= 500 )); then
+    printf '500m-1g\n'
+  elif (( mbps >= 100 )); then
+    printf '100m-500m\n'
+  else
+    printf 'under-100m\n'
+  fi
+}
+
+recommended_profile_defaults() {
+  local memory="${1:-$(detect_memory_tier)}"
+  local bandwidth="${2:-$(detect_bandwidth_tier)}"
+  local path_profile="${3:-normal}"
+  local target_mbps="${4:-}"
+
+  RECOMMENDED_MEMORY="$memory"
+  if [[ -n "$target_mbps" ]]; then
+    RECOMMENDED_BANDWIDTH="$(bandwidth_tier_from_mbps "$target_mbps")"
+  else
+    RECOMMENDED_BANDWIDTH="$bandwidth"
+  fi
+  RECOMMENDED_PATH_PROFILE="$path_profile"
+  RECOMMENDED_TARGET_MBPS="${target_mbps:-auto}"
+
+  if [[ "$memory" == "under-512m" ]]; then
+    RECOMMENDED_WORKLOAD="low-memory"
+    RECOMMENDED_PROFILE="conservative"
+  elif [[ "$path_profile" == "qos-sensitive" ]]; then
+    RECOMMENDED_WORKLOAD="proxy"
+    RECOMMENDED_PROFILE="conservative"
+  elif [[ "$path_profile" == "high-latency" ]]; then
+    RECOMMENDED_WORKLOAD="proxy"
+    RECOMMENDED_PROFILE="balanced"
+  elif [[ "$RECOMMENDED_BANDWIDTH" == "1g-plus" && "$memory" != "512m-1g" ]]; then
+    RECOMMENDED_WORKLOAD="download"
+    RECOMMENDED_PROFILE="balanced"
+  else
+    RECOMMENDED_WORKLOAD="web"
+    RECOMMENDED_PROFILE="conservative"
+  fi
+}
+
+choose_option_with_default() {
+  local prompt="$1"
+  local default="$2"
+  shift 2
+  local options=("$@")
+  local choice
+
+  while true; do
+    echo "$prompt (recommended: $default)" >&2
+    local index=1
+    local option marker
+    for option in "${options[@]}"; do
+      marker=""
+      [[ "$option" == "$default" ]] && marker=" [recommended]"
+      echo "  $index) $option$marker" >&2
+      index=$((index + 1))
+    done
+    if ! read_input "Choose [1-${#options[@]}] or press Enter for $default: " choice; then
+      return 1
+    fi
+    if [[ -z "$choice" ]]; then
+      printf '%s\n' "$default"
+      return 0
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
+      printf '%s\n' "${options[$((choice - 1))]}"
+      return 0
+    fi
+    echo "Invalid choice: $choice" >&2
+  done
+}
+
+read_optional_target_mbps() {
+  local default="${1:-auto}"
+  local value=""
+
+  while true; do
+    if ! read_input "Target bandwidth Mbps [Enter for $default]: " value; then
+      return 1
+    fi
+    if [[ -z "$value" ]]; then
+      printf '%s\n' "$default"
+      return 0
+    fi
+    if [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )); then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    echo "Invalid target bandwidth: $value" >&2
+  done
+}
+
 select_profile_inputs() {
-  SELECTED_WORKLOAD="$(choose_option "Workload" web proxy download low-memory)" || return 1
-  SELECTED_MEMORY="$(choose_option "Memory tier" under-512m 512m-1g 1g-4g 4g-plus)" || return 1
-  SELECTED_BANDWIDTH="$(choose_option "Bandwidth tier" under-100m 100m-500m 500m-1g 1g-plus)" || return 1
-  SELECTED_PROFILE="$(choose_option "Tuning profile" conservative balanced aggressive)" || return 1
+  local detected_memory detected_bandwidth target_mbps path_profile recommendation_target_mbps=""
+
+  detected_memory="$(detect_memory_tier)"
+  detected_bandwidth="$(detect_bandwidth_tier)"
+  target_mbps="$(read_optional_target_mbps auto)" || return 1
+  path_profile="$(choose_option_with_default "Path profile" normal normal high-latency qos-sensitive)" || return 1
+  if [[ "$target_mbps" != "auto" ]]; then
+    recommendation_target_mbps="$target_mbps"
+  fi
+  recommended_profile_defaults "$detected_memory" "$detected_bandwidth" "$path_profile" "$recommendation_target_mbps"
+
+  SELECTED_WORKLOAD="$(choose_option_with_default "Workload" "$RECOMMENDED_WORKLOAD" web proxy download low-memory)" || return 1
+  SELECTED_MEMORY="$(choose_option_with_default "Memory tier" "$RECOMMENDED_MEMORY" under-512m 512m-1g 1g-4g 4g-plus)" || return 1
+  SELECTED_BANDWIDTH="$(choose_option_with_default "Bandwidth tier" "$RECOMMENDED_BANDWIDTH" under-100m 100m-500m 500m-1g 1g-plus)" || return 1
+  SELECTED_PROFILE="$(choose_option_with_default "Tuning profile" "$RECOMMENDED_PROFILE" conservative balanced aggressive)" || return 1
+  SELECTED_PATH_PROFILE="$path_profile"
+  SELECTED_TARGET_MBPS="$target_mbps"
 }
 
 explain_config() {
@@ -514,6 +806,8 @@ explain_config() {
   echo "Memory tier: $memory"
   echo "Bandwidth tier: $bandwidth"
   echo "Tuning profile: $profile"
+  echo "Path profile: ${SELECTED_PATH_PROFILE:-normal}"
+  echo "Target bandwidth Mbps: ${SELECTED_TARGET_MBPS:-auto}"
   echo "This profile enables fq + BBR and tunes queue, backlog, and TCP buffer limits."
 }
 
@@ -536,7 +830,9 @@ run_generate_flow() {
   esac
 
   select_profile_inputs || return 1
-  config="$(render_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE")"
+  SELECTED_PATH_PROFILE="${SELECTED_PATH_PROFILE:-normal}"
+  SELECTED_TARGET_MBPS="${SELECTED_TARGET_MBPS:-auto}"
+  config="$(render_config "$SELECTED_WORKLOAD" "$SELECTED_MEMORY" "$SELECTED_BANDWIDTH" "$SELECTED_PROFILE" "$SELECTED_PATH_PROFILE" "$SELECTED_TARGET_MBPS")"
   show_status
   echo
   printf '%s\n' "$config"
@@ -568,6 +864,27 @@ restore_latest_backup() {
   show_status
 }
 
+run_apply_tc_limit_flow() {
+  local default_rate="${SELECTED_TARGET_MBPS:-90}"
+  local iface rate confirmation
+
+  require_root
+  read_input "Interface to limit, for example eth0: " iface || return 1
+  validate_iface_name "$iface" || die "invalid interface name: $iface"
+  rate="$(read_optional_target_mbps "$default_rate")" || return 1
+  [[ "$rate" != "auto" ]] || die "tc egress limit requires a numeric Mbps value"
+  validate_positive_mbps "$rate" || die "target bandwidth must be a positive integer Mbps value"
+
+  echo "This will replace the root qdisc on $iface with a FlareTuner-managed egress limit at $rate Mbps."
+  read_input "Type yes to apply this tc limit: " confirmation || return 1
+  if [[ "$confirmation" != "yes" ]]; then
+    echo "tc limit cancelled."
+    return 1
+  fi
+
+  apply_tc_egress_limit "$iface" "$rate"
+}
+
 main() {
   echo "$APP_NAME $VERSION"
 
@@ -577,10 +894,12 @@ main() {
     echo "2) Preview tuning only"
     echo "3) Restore last FlareTuner backup"
     echo "4) Show current network tuning status"
-    echo "5) Exit"
+    echo "5) Apply tc egress bandwidth limit"
+    echo "6) Clear FlareTuner tc egress limit"
+    echo "7) Exit"
 
     local choice
-    if ! read_input "Choose [1-5]: " choice; then
+    if ! read_input "Choose [1-7]: " choice; then
       return 0
     fi
     case "$choice" in
@@ -601,6 +920,14 @@ main() {
         show_status
         ;;
       5)
+        if ! run_apply_tc_limit_flow; then
+          echo "Operation cancelled."
+        fi
+        ;;
+      6)
+        clear_tc_egress_limit
+        ;;
+      7)
         return 0
         ;;
       *)

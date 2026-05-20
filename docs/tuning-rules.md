@@ -4,12 +4,26 @@ FlareTuner's first script version targets Debian and Ubuntu VPS servers using st
 
 ## Inputs
 
-The generated configuration is based on four interactive inputs:
+The generated configuration is based on six interactive inputs:
 
 - Workload: `web`, `proxy`, `download`, or `low-memory`.
 - Memory tier: `under-512m`, `512m-1g`, `1g-4g`, or `4g-plus`.
 - Bandwidth tier: `under-100m`, `100m-500m`, `500m-1g`, or `1g-plus`.
 - Tuning profile: `conservative`, `balanced`, or `aggressive`.
+- Path profile: `normal`, `high-latency`, or `qos-sensitive`.
+- Optional target bandwidth in Mbps, or `auto`.
+
+FlareTuner preselects recommended defaults before prompting. It reads `/proc/meminfo` to classify memory and reads numeric `/sys/class/net/*/speed` values, excluding loopback, to classify bandwidth. If memory cannot be read, it defaults to `512m-1g`. If interface speed cannot be read, it defaults to `under-100m`.
+
+The recommendation rule stays conservative:
+
+- `under-512m` memory recommends `low-memory` with the `conservative` profile.
+- `1g-plus` bandwidth with more than 1 GiB memory recommends `download` with the `balanced` profile.
+- Other detected combinations recommend `web` with the `conservative` profile.
+
+Users can press Enter to accept each recommendation or select a different menu option. FlareTuner does not run speed tests or contact cloud provider metadata services.
+
+The optional target bandwidth value maps to the same bandwidth tiers used by the rest of the profile. It does not enforce a traffic cap. It only guides sysctl profile generation. Real per-route or per-user rate limiting requires a separate traffic control layer such as application-level limits or `tc`.
 
 ## Baseline Settings
 
@@ -38,6 +52,29 @@ The `download` workload raises socket buffer ceilings with `net.core.rmem_max`, 
 
 The `low-memory` workload takes priority over throughput-oriented choices by bounding socket buffers, connection backlog values, and network device backlog to smaller values.
 
+## Path Behavior
+
+The `normal` path profile leaves the workload, memory, bandwidth, and tuning profile rules unchanged.
+
+The `high-latency` path profile is intended for cross-region or high-RTT paths. It allows moderate socket buffer growth when memory is sufficient, because higher RTT increases bandwidth-delay product.
+
+The `qos-sensitive` path profile is intended for routes where bursts or sustained throughput above a threshold appear to trigger throttling. It keeps socket buffers, connection backlog values, and device backlog more conservative. This can reduce aggressive buffering, but it does not shape traffic or guarantee that throughput remains under a provider or network QoS threshold.
+
+## Traffic Control Limits
+
+FlareTuner can optionally apply a runtime `tc` egress bandwidth limit to a selected interface. This is intended for server-to-client return traffic, for example a Japan VPS sending proxy traffic back to a client where rates above a threshold trigger QoS.
+
+The current limiter is interface-wide egress shaping:
+
+- It requires root.
+- It validates the interface name and numeric Mbps value before running `tc`.
+- It replaces the selected interface root qdisc with an `htb` class at the requested rate and attaches `fq` below that class.
+- It stores FlareTuner metadata at `/var/lib/flaretuner/tc-limit.env`.
+- It can clear only the latest FlareTuner-recorded tc limit.
+- It is runtime state and is not persisted across reboot by FlareTuner.
+
+The limiter does not handle ingress shaping, IFB devices, per-user limits, per-destination limits, or proxy-application account limits. It also cannot control the client-to-server direction from the server, because TCP rate control primarily applies at the sender.
+
 ## Rollback Model
 
 FlareTuner writes only this managed sysctl file:
@@ -56,6 +93,12 @@ Backups are stored under:
 
 ```text
 /var/lib/flaretuner/backup/
+```
+
+Optional tc limit metadata is stored at:
+
+```text
+/var/lib/flaretuner/tc-limit.env
 ```
 
 Restore uses the latest FlareTuner metadata to restore or remove only the FlareTuner-managed sysctl file. If a previous managed file existed, restore copies that backup back to `/etc/sysctl.d/99-flaretuner.conf`. If no previous managed file existed, restore removes `/etc/sysctl.d/99-flaretuner.conf`.

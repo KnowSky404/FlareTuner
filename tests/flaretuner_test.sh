@@ -9,17 +9,19 @@ TEST_TMP_DIR="$(mktemp -d)"
 
 cleanup() {
   rm -rf "$TEST_TMP_DIR"
-  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD
-  unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR
-  unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
-  unset -f sysctl modprobe lsmod id select_profile_inputs 2>/dev/null || true
+  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD FLARETUNER_TC_CMD
+  unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR FLARETUNER_MEMINFO FLARETUNER_NET_CLASS_DIR
+  unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE SELECTED_PATH_PROFILE SELECTED_TARGET_MBPS
+  unset RECOMMENDED_WORKLOAD RECOMMENDED_MEMORY RECOMMENDED_BANDWIDTH RECOMMENDED_PROFILE RECOMMENDED_PATH_PROFILE RECOMMENDED_TARGET_MBPS
+  unset -f sysctl modprobe lsmod id tc select_profile_inputs 2>/dev/null || true
 }
 
 reset_test_env() {
-  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD
-  unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR
-  unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE
-  unset -f sysctl modprobe lsmod id select_profile_inputs 2>/dev/null || true
+  unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD FLARETUNER_TC_CMD
+  unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR FLARETUNER_MEMINFO FLARETUNER_NET_CLASS_DIR
+  unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE SELECTED_PATH_PROFILE SELECTED_TARGET_MBPS
+  unset RECOMMENDED_WORKLOAD RECOMMENDED_MEMORY RECOMMENDED_BANDWIDTH RECOMMENDED_PROFILE RECOMMENDED_PATH_PROFILE RECOMMENDED_TARGET_MBPS
+  unset -f sysctl modprobe lsmod id tc select_profile_inputs 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -89,6 +91,17 @@ test_render_high_throughput_config() {
   assert_contains "$config" "net.core.wmem_max = 67108864" "high throughput wmem"
 }
 
+test_render_qos_sensitive_proxy_config_caps_buffers() {
+  FLARETUNER_TESTING=1 source "$SCRIPT"
+  local config
+  config="$(render_config "proxy" "4g-plus" "1g-plus" "balanced" "qos-sensitive" "90")"
+  assert_contains "$config" "# Path profile: qos-sensitive" "qos path header"
+  assert_contains "$config" "# Target bandwidth Mbps: 90" "target bandwidth header"
+  assert_contains "$config" "net.core.netdev_max_backlog = 5000" "qos-sensitive netdev cap"
+  assert_contains "$config" "net.core.rmem_max = 16777216" "qos-sensitive rmem cap"
+  assert_contains "$config" "net.core.wmem_max = 16777216" "qos-sensitive wmem cap"
+}
+
 test_supported_debian_detection() {
   local os_release
   os_release="$TEST_TMP_DIR/debian-os-release"
@@ -148,6 +161,101 @@ test_choose_option_handles_eof() {
 
   assert_equals "$status" "1" "choose_option EOF status"
   assert_contains "$output" "Input ended; aborting." "choose_option EOF message"
+}
+
+test_detect_memory_tier_from_meminfo() {
+  local meminfo
+  meminfo="$TEST_TMP_DIR/meminfo"
+  printf 'MemTotal:        786432 kB\n' >"$meminfo"
+
+  FLARETUNER_TESTING=1 FLARETUNER_MEMINFO="$meminfo" source "$SCRIPT"
+
+  assert_equals "$(detect_memory_tier)" "512m-1g" "detected memory tier"
+}
+
+test_detect_bandwidth_tier_from_sysfs_speed() {
+  local net_dir
+  net_dir="$TEST_TMP_DIR/net"
+  mkdir -p "$net_dir/lo" "$net_dir/eth0" "$net_dir/eth1"
+  printf '1000\n' >"$net_dir/eth0/speed"
+  printf '100\n' >"$net_dir/eth1/speed"
+
+  FLARETUNER_TESTING=1 FLARETUNER_NET_CLASS_DIR="$net_dir" source "$SCRIPT"
+
+  assert_equals "$(detect_bandwidth_tier)" "1g-plus" "detected bandwidth tier"
+}
+
+test_recommended_profile_defaults_for_low_memory() {
+  FLARETUNER_TESTING=1 source "$SCRIPT"
+
+  recommended_profile_defaults under-512m 1g-plus normal ""
+
+  assert_equals "$RECOMMENDED_WORKLOAD" "low-memory" "low-memory workload recommendation"
+  assert_equals "$RECOMMENDED_MEMORY" "under-512m" "low-memory memory recommendation"
+  assert_equals "$RECOMMENDED_BANDWIDTH" "1g-plus" "low-memory bandwidth recommendation"
+  assert_equals "$RECOMMENDED_PROFILE" "conservative" "low-memory profile recommendation"
+}
+
+test_bandwidth_tier_from_target_mbps() {
+  FLARETUNER_TESTING=1 source "$SCRIPT"
+
+  assert_equals "$(bandwidth_tier_from_mbps 90)" "under-100m" "90 Mbps tier"
+  assert_equals "$(bandwidth_tier_from_mbps 100)" "100m-500m" "100 Mbps tier"
+  assert_equals "$(bandwidth_tier_from_mbps 500)" "500m-1g" "500 Mbps tier"
+  assert_equals "$(bandwidth_tier_from_mbps 1000)" "1g-plus" "1000 Mbps tier"
+}
+
+test_recommended_profile_defaults_for_qos_sensitive_target() {
+  FLARETUNER_TESTING=1 source "$SCRIPT"
+
+  recommended_profile_defaults 1g-4g 500m-1g qos-sensitive 90
+
+  assert_equals "$RECOMMENDED_WORKLOAD" "proxy" "qos-sensitive workload recommendation"
+  assert_equals "$RECOMMENDED_BANDWIDTH" "under-100m" "qos-sensitive target bandwidth recommendation"
+  assert_equals "$RECOMMENDED_PROFILE" "conservative" "qos-sensitive profile recommendation"
+  assert_equals "$RECOMMENDED_PATH_PROFILE" "qos-sensitive" "qos-sensitive path recommendation"
+  assert_equals "$RECOMMENDED_TARGET_MBPS" "90" "qos-sensitive target mbps recommendation"
+}
+
+test_choose_option_with_default_accepts_blank_default() {
+  FLARETUNER_TESTING=1 source "$SCRIPT"
+
+  local selected
+  selected="$(printf '\n' | choose_option_with_default "Workload" proxy web proxy download low-memory)"
+
+  assert_equals "$selected" "proxy" "blank choice should accept default"
+}
+
+test_choose_option_with_default_allows_manual_override() {
+  FLARETUNER_TESTING=1 source "$SCRIPT"
+
+  local selected
+  selected="$(printf '3\n' | choose_option_with_default "Workload" proxy web proxy download low-memory)"
+
+  assert_equals "$selected" "download" "numeric choice should override default"
+}
+
+test_select_profile_inputs_uses_detected_defaults() {
+  local meminfo net_dir
+  meminfo="$TEST_TMP_DIR/select-meminfo"
+  net_dir="$TEST_TMP_DIR/select-net"
+  printf 'MemTotal:        262144 kB\n' >"$meminfo"
+  mkdir -p "$net_dir/eth0"
+  printf '1000\n' >"$net_dir/eth0/speed"
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_MEMINFO="$meminfo" \
+    FLARETUNER_NET_CLASS_DIR="$net_dir" \
+    source "$SCRIPT"
+
+  select_profile_inputs <<< $'90\n\n\n\n\n\n'
+
+  assert_equals "$SELECTED_WORKLOAD" "low-memory" "selected default workload"
+  assert_equals "$SELECTED_MEMORY" "under-512m" "selected default memory"
+  assert_equals "$SELECTED_BANDWIDTH" "under-100m" "selected target bandwidth"
+  assert_equals "$SELECTED_PROFILE" "conservative" "selected default profile"
+  assert_equals "$SELECTED_PATH_PROFILE" "normal" "selected default path profile"
+  assert_equals "$SELECTED_TARGET_MBPS" "90" "selected custom target mbps"
 }
 
 test_preview_does_not_load_bbr() {
@@ -821,12 +929,133 @@ EOF
   assert_file_contains "$managed_conf" "previous config" "verification failure should restore previous managed config"
 }
 
+test_apply_tc_egress_limit_records_metadata_and_commands() {
+  local root state_dir log_file
+  root="$TEST_TMP_DIR/tc-apply"
+  state_dir="$root/state"
+  log_file="$root/tc.log"
+  mkdir -p "$state_dir"
+
+  tc() {
+    printf '%s\n' "$*" >>"$log_file"
+    return 0
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_TC_CMD=tc \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  apply_tc_egress_limit eth0 90
+
+  local log metadata
+  log="$(<"$log_file")"
+  metadata="$(<"$state_dir/tc-limit.env")"
+  assert_contains "$log" "qdisc replace dev eth0 root handle 1: htb default 10" "tc root qdisc command"
+  assert_contains "$log" "class replace dev eth0 parent 1: classid 1:10 htb rate 90mbit ceil 90mbit" "tc rate class command"
+  assert_contains "$log" "qdisc replace dev eth0 parent 1:10 handle 10: fq" "tc fq child command"
+  assert_contains "$metadata" "IFACE=eth0" "tc metadata iface"
+  assert_contains "$metadata" "RATE_MBPS=90" "tc metadata rate"
+}
+
+test_apply_tc_egress_limit_rejects_unsafe_iface() {
+  local state_dir
+  state_dir="$TEST_TMP_DIR/tc-unsafe-state"
+  mkdir -p "$state_dir"
+
+  tc() {
+    fail "tc should not run for unsafe interface"
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_TC_CMD=tc \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  local status
+  set +e
+  ( apply_tc_egress_limit 'eth0;rm' 90 ) >/dev/null 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" == "0" ]]; then
+    fail "unsafe interface should be rejected"
+  fi
+}
+
+test_clear_tc_egress_limit_uses_metadata() {
+  local root state_dir log_file
+  root="$TEST_TMP_DIR/tc-clear"
+  state_dir="$root/state"
+  log_file="$root/tc.log"
+  mkdir -p "$state_dir"
+  cat >"$state_dir/tc-limit.env" <<'EOF'
+IFACE=eth0
+RATE_MBPS=90
+EOF
+
+  tc() {
+    printf '%s\n' "$*" >>"$log_file"
+    return 0
+  }
+
+  id() {
+    if [[ "$1" == "-u" ]]; then
+      echo "0"
+      return 0
+    fi
+    return 1
+  }
+
+  FLARETUNER_TESTING=1 \
+    FLARETUNER_STATE_DIR="$state_dir" \
+    FLARETUNER_TC_CMD=tc \
+    FLARETUNER_ID_CMD=id \
+    source "$SCRIPT"
+
+  clear_tc_egress_limit
+
+  local log
+  log="$(<"$log_file")"
+  assert_contains "$log" "qdisc del dev eth0 root" "tc clear command"
+  if [[ -e "$state_dir/tc-limit.env" ]]; then
+    fail "tc metadata should be removed after clearing"
+  fi
+}
+
 run_test "render low-memory conservative config" test_render_low_memory_config
 run_test "render high-throughput aggressive config" test_render_high_throughput_config
+run_test "render qos-sensitive proxy config caps buffers" test_render_qos_sensitive_proxy_config_caps_buffers
 run_test "detect supported Debian" test_supported_debian_detection
 run_test "detect unsupported Alpine" test_unsupported_alpine_detection
 run_test "detect BBR availability" test_bbr_available_from_sysctl_output
 run_test "choose option handles EOF" test_choose_option_handles_eof
+run_test "detect memory tier from meminfo" test_detect_memory_tier_from_meminfo
+run_test "detect bandwidth tier from sysfs speed" test_detect_bandwidth_tier_from_sysfs_speed
+run_test "recommend low-memory defaults" test_recommended_profile_defaults_for_low_memory
+run_test "map target Mbps to bandwidth tier" test_bandwidth_tier_from_target_mbps
+run_test "recommend qos-sensitive target defaults" test_recommended_profile_defaults_for_qos_sensitive_target
+run_test "choose option with default accepts blank" test_choose_option_with_default_accepts_blank_default
+run_test "choose option with default allows manual override" test_choose_option_with_default_allows_manual_override
+run_test "select profile inputs uses detected defaults" test_select_profile_inputs_uses_detected_defaults
 run_test "preview does not load BBR" test_preview_does_not_load_bbr
 run_test "status reports managed config backup and loaded BBR" test_status_reports_managed_config_backup_and_loaded_bbr
 run_test "status reports absent managed config and no backup" test_status_reports_absent_managed_config_and_no_backup
@@ -840,5 +1069,8 @@ run_test "restore rejects symlink backup file" test_restore_rejects_symlink_back
 run_test "restore rejects symlink parent directory escape" test_restore_rejects_symlink_parent_directory_escape
 run_test "apply restores previous file when sysctl fails" test_apply_restores_previous_file_when_sysctl_fails
 run_test "apply restores previous file when verification fails" test_apply_restores_previous_file_when_verification_fails
+run_test "apply tc egress limit records metadata and commands" test_apply_tc_egress_limit_records_metadata_and_commands
+run_test "apply tc egress limit rejects unsafe iface" test_apply_tc_egress_limit_rejects_unsafe_iface
+run_test "clear tc egress limit uses metadata" test_clear_tc_egress_limit_uses_metadata
 
 echo "Passed $pass_count tests"
