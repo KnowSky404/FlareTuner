@@ -131,6 +131,12 @@ See [docs/tuning-rules.md](docs/tuning-rules.md) for the profile inputs, baselin
 
 ## Development
 
+Every change uses a dedicated local Git worktree and task branch from `origin/main`, including documentation and configuration changes. Complete local verification and Codex `/review` before every push and before opening a PR. Fix review findings before proceeding; an unchanged HEAD, base, and diff may reuse the same completed local review for the push and PR creation.
+
+Push the branch and open a PR to `main`. Wait for any automatically started Codex review on the current HEAD and resolve its findings. Never manually summon or retrigger the bot. If inspection confirms no review started, record `not_triggered` and proceed with rebase merging after local checks and existing merge requirements pass. Confirm integration, then delete the task branches and clean worktree. See [AGENTS.md](AGENTS.md#development-and-pr-workflow) for the full procedure.
+
+GitHub Actions is disabled at repository level. Running or enabling Actions requires explicit user authorization; permission to push, open a PR, merge, or release does not include permission to run CI. Required checks run locally by default. Any future workflow definitions must be manual-only unless the user explicitly authorizes automatic triggers. Repository settings allow rebase merging only and automatically delete merged PR branches.
+
 Run shell syntax checks:
 
 ```bash

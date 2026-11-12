@@ -17,6 +17,14 @@ Use this skill to keep FlareTuner changes aligned with its narrow safety model: 
 
 ## Workflow
 
+For every change, including docs and configuration, follow `AGENTS.md`'s Development And PR Workflow and GitHub Actions Authorization sections:
+
+1. Create a dedicated local worktree and task branch from current `origin/main` before editing.
+2. Verify locally, create focused Conventional Commits, and complete local Codex `/review` before every push and PR creation. Fix findings and repeat review after changes; reuse only for unchanged HEAD, base, and diff.
+3. Keep repository Actions disabled and verify that setting before pushes, PR creation, and merges. Never enable, dispatch, rerun, approve, or indirectly trigger Actions without explicit user authorization. Future workflows are manual-only by default.
+4. Push the branch, open a PR to `main`, and wait for any automatic current-HEAD Codex review to complete without unresolved findings. Never manually trigger or retrigger the bot. Confirmed absence permits `not_triggered`; pending, failed, cancelled, stale, or unreadable review state does not.
+5. Rebase merge the reviewed HEAD after the gates pass, verify integration into `origin/main`, and remove only the integrated task's branches and clean worktree. Preserve unrelated changes and evidence.
+
 For behavior changes or bug fixes:
 
 1. Add or update focused tests in `tests/flaretuner_test.sh` first when practical.

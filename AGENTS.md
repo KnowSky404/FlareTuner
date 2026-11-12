@@ -66,6 +66,29 @@ fi
 - Use ASCII in scripts and docs unless existing content requires otherwise.
 - Avoid broad refactors unrelated to the requested change.
 
+## Development And PR Workflow
+
+These rules apply to every feature, bug fix, refactor, test, documentation, configuration, and workflow change, including changes to these instructions.
+
+1. Inspect the current status, worktrees, and remote state. Fetch `origin` and create a dedicated local worktree with a new task branch from `origin/main`. Do not develop directly on `main` or reuse another task's branch. Preserve unrelated changes.
+2. Implement and run the required local verification in that worktree. Inspect the complete diff and create focused Conventional Commits.
+3. Before every push and before creating a PR, run local Codex `/review` on the complete branch diff against `origin/main` (CLI equivalent: `codex review --base origin/main`). Resolve findings and repeat verification and review until no unresolved findings remain. Record the reviewed HEAD and base SHAs. One completed review may cover the following push and PR creation only while HEAD, base, and diff are unchanged. Any subsequent change invalidates that review. If local review cannot run or complete, stop before pushing or creating the PR and report the blocker.
+4. Verify the GitHub Actions policy below before pushing, creating the PR, or merging. Push the task branch and open a PR targeting `main`; never push task changes directly to `main`.
+5. Inspect reviews, inline threads, PR comments, and check runs for the current PR HEAD. If Codex automatically starts a review, wait for completion and resolve all findings before merging. Fixes must go through local verification and `/review` again before another push. Reviews for an older HEAD do not satisfy this gate.
+6. Never manually trigger or retrigger the Codex bot: no review-request comments, reviewer requests, dispatches, configuration toggles, empty commits, or draft/ready transitions intended to provoke review. If read-only inspection confirms no automatic Codex review started, record `not_triggered` and proceed without requesting one. Pending/running, failed/cancelled, stale, unreadable, or query-failed review states are not proof of absence; reconcile them before merging. An acknowledgement or reaction alone does not prove review completion.
+7. After local verification, the applicable review gate, and any existing merge requirements are satisfied, rebase merge the reviewed PR HEAD (for example, `gh pr merge <PR> --rebase --match-head-commit <SHA>`). Do not bypass branch protections or use merge/squash commits. Completing a requested change includes pushing, opening the PR, handling automatic review, merging, and cleanup unless the user explicitly narrows the scope.
+8. Confirm the PR is merged and its changes are present in `origin/main`; rebase can change commit SHAs, so verify content or patch equivalence. Fast-forward a clean local `main` only. Delete the original remote task branch if it still exists, remove the clean task worktree without force, and delete its local branch only after confirming all task changes were integrated. Preserve unrelated worktrees, untracked files, and retained evidence. Report any cleanup blocker.
+
+## GitHub Actions Authorization
+
+- GitHub Actions is disabled at repository level by default. Keep it disabled unless the user explicitly authorizes a specific workflow/run or a change to this policy. Verify the live setting with `gh api repos/KnowSky404/FlareTuner/actions/permissions`; `enabled` must be `false` before ordinary pushes, PR creation, and merges. If it has drifted, restore the disabled setting before proceeding; report a permission blocker instead of risking a run.
+- A request to implement, test, push, create a PR, merge, tag, or release is not authorization to run GitHub Actions. Run required verification locally.
+- Without explicit authorization, do not enable Actions, dispatch or rerun workflows/jobs, approve pending runs, or add/enable automatic triggers such as `push`, `pull_request`, `pull_request_target`, `schedule`, `release`, `workflow_run`, or `repository_dispatch`. This includes indirect triggers and workflows in other repositories.
+- If a workflow is needed, keep it manual-only with `workflow_dispatch`; adding that definition does not authorize enabling Actions or executing it. Before any authorized temporary enablement, inspect all workflows and prevent unrelated automatic runs, then restore the disabled setting after the authorized work unless broader permission was explicit.
+- Do not add required Actions checks while Actions is disabled. If an existing required check blocks merging, report the conflict; do not enable CI or bypass protection without explicit authorization.
+- Automatic Codex review through its GitHub App is separate from Actions authorization. Allow an existing automatic review, but never enable or run Actions to obtain it. If review requires Actions, report that conflict.
+- Repository settings are maintained through GitHub, not tracked files: allow rebase merging only and enable automatic deletion of merged PR branches. Verify settings when delivering workflow changes; do not claim a documentation edit alone enforces them.
+
 ## Git And Commit Discipline
 
 - Prefer small, atomic commits that each represent one coherent change.
