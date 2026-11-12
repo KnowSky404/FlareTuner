@@ -2,7 +2,7 @@
 
 FlareTuner is an interactive Bash script for conservative network tuning on Debian and Ubuntu VPS servers. It focuses on standard Linux BBR with `fq`, a small managed sysctl profile, and an optional runtime `tc` egress limit for servers that need a practical bandwidth ceiling.
 
-The project is intentionally small: one Bash script, one shell test runner, and Markdown documentation. It does not install kernels, benchmark the network, or try to tune BBRv2.
+The project is intentionally small: one runtime Bash script, focused shell tests, and Markdown documentation. It does not install kernels, benchmark the network, or try to tune BBRv2.
 
 ## Scope
 
@@ -103,7 +103,7 @@ First tc apply accepts only an unshaped `noqueue` root without classes/filters. 
 
 Full status may require root to read private state. It distinguishes the default qdisc parameter from the actual recorded device queue, active limits from stale metadata, and conflicts from unreadable state.
 
-The safety suite uses isolated files and simulated commands; it does not establish real-kernel or production VPS acceptance. See the [v0.2.0 safety report](docs/runtime-safety-v020.md) for verification evidence, limitations, and follow-up acceptance. No Release is published by this change.
+The 71-case safety suite uses isolated files and simulated commands. An optional network-namespace harness passed ten real-kernel tc cases on Ubuntu. Real sysctl and production VPS acceptance remain outstanding. See the [v0.2.0 safety report](docs/runtime-safety-v020.md) for verification evidence, limitations, and follow-up acceptance. No Release is published by this change.
 
 ## AI Agent Notes
 

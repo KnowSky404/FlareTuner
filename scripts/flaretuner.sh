@@ -599,7 +599,10 @@ tc_expected_shape() {
     count=$((count + 1))
   done <<<"$LIVE_QDISC"
   [[ "$roots" == 1 ]] || return 1
-  if [[ "$stage" == 3 || "$stage" == 2 ]]; then [[ "$count" == 2 && "$leaves" == 1 ]] || return 1;
+  if [[ "$stage" == 3 ]]; then [[ "$count" == 2 && "$leaves" == 1 ]] || return 1;
+  elif [[ "$stage" == 2 ]]; then
+    # Some kernels omit the automatic handle-zero pfifo leaf from dumps.
+    [[ "$count" == 1 || "$count" == 2 ]] || return 1
   else [[ "$count" == 1 ]] || return 1; fi
   if [[ "$stage" == 1 ]]; then [[ -z "$LIVE_CLASS" ]]; return; fi
   [[ "$LIVE_CLASS" == 'class htb 1:10 root '* && "$LIVE_CLASS" != *$'\n'* ]] || return 1

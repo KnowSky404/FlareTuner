@@ -31,9 +31,10 @@ corrupt metadata, INT/TERM/HUP, metadata-publication interruption, shared lockin
 interactive apply/status/clear/failure paths, external managed-file deletion after
 reload, failed restore with distinct on-disk and saved runtime values, persistent
 reload errors that still restore saved keys, per-key restoration failures, external
-runtime drift, and unrelated valid sysctl exclusions.
+runtime drift, unrelated valid sysctl exclusions, and hidden implicit HTB leaves.
+The optional `tests/tc_netns_test.sh` adds ten real-kernel tc acceptance cases.
 
-Local verification passed: **70/70 cases**, all three syntax checks, and
+Local verification passed: **71/71 cases**, all four syntax checks, and
 `git diff --check`. Interactive tc apply/status/clear and failure paths were
 exercised with the same isolated fixtures. No profile values were changed.
 
@@ -43,15 +44,34 @@ Required local commands:
 bash -n scripts/flaretuner.sh
 bash -n tests/flaretuner_test.sh
 bash -n tests/safety_cases.sh
+bash -n tests/tc_netns_test.sh
 bash tests/flaretuner_test.sh
 git diff --check
 ```
 
-These are mock/filesystem tests, not production network validation. The test
-fixtures redirect all sysctl and tc writes, source directories, state and sysfs.
-The current process has neither CAP_NET_ADMIN nor CAP_SYS_ADMIN. An isolation
-`unshare -Urn true` preflight fails at uid_map with Operation not permitted.
-No real-kernel shaping or sysctl reload was attempted on this VPS.
+The 71-case suite uses isolated filesystem and command mocks. The default sandbox
+has no CAP_NET_ADMIN/CAP_SYS_ADMIN, and its `unshare -Urn true` preflight fails.
+Authorized execution outside that sandbox has the required capabilities and passed
+**10/10 real-kernel tc cases** with:
+
+```bash
+sudo bash tests/tc_netns_test.sh
+```
+
+The optional harness verifies a fresh network namespace differs from the parent
+and initially contains only loopback. It makes mount propagation private, mounts
+sysfs for that namespace, and uses only a newly created veth pair. It validates
+real HTB/fq creation, repeat, rate update, clear/repeat, foreign-root preservation,
+class/child/metadata failures, external class drift, and deleted-tree stale cleanup.
+No host interface is selected, and no real sysctl write/reload is performed.
+
+The real-kernel run exposed an implicit HTB pfifo leaf absent from qdisc dumps;
+the implementation now accepts this known intermediate state, with a corresponding
+mock regression. Explicit pfifo dumps remain supported. The HTB quantum warning
+from default r2q remains visible; this work does not tune throughput or benchmark.
+Kernel/iproute2 versions and raw outputs are retained with the acceptance logs.
+These checks prove the tested tc paths on one Ubuntu host kernel, not Debian,
+production traffic, reboot, all failure modes, or real sysctl acceptance.
 
 ## Transaction and ownership limits
 
@@ -86,7 +106,8 @@ and the automatic HTB pfifo leaf on supported target versions. Inject failures
 and interrupts only in the disposable environment; inspect journal retention,
 rollback values and nonzero results. Verify both Debian and Ubuntu loading paths,
 including a sysctl.conf symlink and a conflicting sing-box-vps-style BBR declaration.
-The current delivery does not claim these real-kernel checks passed.
+The ten isolated tc checks above passed; broader disposable-VPS and real sysctl
+acceptance remains outstanding.
 
 ## v0.3.0 CLI and sing-box-vps follow-ups
 
