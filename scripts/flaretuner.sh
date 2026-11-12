@@ -248,8 +248,13 @@ config_entries() {
   awk '
     /^[[:space:]]*([#;]|$)/ {next}
     {
-      line=$0; sub(/^[[:space:]]*/, "", line)
-      if (index(line,"=")==0) {print "!unknown\t" line; next}
+      line=$0; sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]*$/, "", line)
+      if (index(line,"=")==0) {
+        if (line ~ /^-[^[:space:]=]+$/) {
+          key=substr(line,2); gsub(/\//,".",key); print "!exclude\t" key
+        } else print "!unknown\t" line
+        next
+      }
       key=substr(line,1,index(line,"=")-1); val=substr(line,index(line,"=")+1)
       gsub(/[[:space:]]/, "", key); sub(/^-/, "", key); gsub(/\//,".",key)
       sub(/[[:space:]]*[#;].*$/, "", val); gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
@@ -302,6 +307,12 @@ check_sysctl_conflicts() {
     owner=external
     if grep -Eiq 'managed by|sing-box|ansible|puppet|chef|cloud-init' "$file"; then owner=tool-managed; fi
     while IFS=$'\t' read -r key value; do
+      if [[ "$key" == '!exclude' ]]; then
+        for target in "${!targets[@]}"; do
+          if [[ "$target" == $value ]]; then echo "Sysctl sources: uncertain exclusion $target ($file)"; bad=1; fi
+        done
+        continue
+      fi
       if [[ "$key" == '!unknown' ]]; then echo "Sysctl sources: unknown syntax $file: $value"; bad=1; continue; fi
       for target in "${!targets[@]}"; do
         if [[ "$target" == $key ]]; then
@@ -416,33 +427,44 @@ prepare_sysctl_transaction() {
   printf '%s\n' "$TX_SOURCES" >"$TX_DIR/sources.sha256" || return 1
 }
 
+validate_sysctl_recovery_runtime() {
+  local key value current file expected matched
+  while IFS=$'\t' read -r key value; do
+    current="$(sysctl_get "$key" | normalize_value)" || return 1
+    matched=0
+    for file in runtime.conf after.conf before.conf restore.conf; do
+      [[ -f "$TX_DIR/$file" ]] || continue
+      expected="$(config_entries "$TX_DIR/$file" | awk -F '\t' -v key="$key" '$1==key {print $2}')"
+      if [[ -n "$expected" && "$current" == "$expected" ]]; then matched=1; break; fi
+    done
+    [[ "$matched" == 1 ]] || return 1
+  done < <(config_entries "$TX_DIR/runtime.conf")
+}
+
 rollback_sysctl() {
-  local key value current desired reload_value
+  local key value recovery_status=0
   safe_path "$MANAGED_CONF" || return 1
   if [[ "$(file_hash "$MANAGED_CONF")" != "$TX_AFTER_HASH" && "$(file_hash "$MANAGED_CONF")" == "$TX_BEFORE_HASH" ]]; then
     verify_config_runtime "$TX_DIR/runtime.conf"
     return $?
   fi
   [[ "$(file_hash "$MANAGED_CONF")" == "$TX_AFTER_HASH" && "$(source_fingerprint)" == "$TX_SOURCES" ]] || return 1
-  # Refuse to restore a key another writer has changed to an unexpected value.
-  while IFS=$'\t' read -r key value; do
-    current="$(sysctl_get "$key" | normalize_value)" || return 1
-    desired="$(config_entries "$TX_DIR/after.conf" | awk -F '\t' -v key="$key" '$1==key {print $2}')"
-    reload_value=''
-    if [[ -f "$TX_DIR/restore.conf" ]]; then
-      reload_value="$(config_entries "$TX_DIR/restore.conf" | awk -F '\t' -v key="$key" '$1==key {print $2}')"
-    fi
-    [[ "$current" == "$value" || "$current" == "$desired" || ( -n "$reload_value" && "$current" == "$reload_value" ) ]] || return 1
-  done < <(config_entries "$TX_DIR/runtime.conf")
+  validate_sysctl_recovery_runtime || return 1
   if [[ "$TX_BEFORE_HASH" == absent ]]; then rm -- "$MANAGED_CONF" || return 1;
   else atomic_publish "$TX_DIR/before.conf" "$MANAGED_CONF" || return 1; fi
-  # --system has broad effects. Only managed keys have a restorable snapshot.
-  "$SYSCTL_CMD" --system || return 1
+  # A broad reload error must not skip restoration of our saved runtime keys.
+  if ! "$SYSCTL_CMD" --system; then
+    echo 'Rollback reload failed; continuing guarded managed-runtime recovery.' >&2
+    recovery_status=1
+  fi
+  [[ "$(file_hash "$MANAGED_CONF")" == "$TX_BEFORE_HASH" && "$(source_fingerprint)" == "$TX_SOURCES" ]] || return 1
+  validate_sysctl_recovery_runtime || return 1
   while IFS=$'\t' read -r key value; do
-    "$SYSCTL_CMD" -w "$key=$value" || return 1
+    "$SYSCTL_CMD" -w "$key=$value" || recovery_status=1
   done < <(config_entries "$TX_DIR/runtime.conf")
-  verify_config_runtime "$TX_DIR/runtime.conf" || return 1
-  [[ "$(file_hash "$MANAGED_CONF")" == "$TX_BEFORE_HASH" ]]
+  verify_config_runtime "$TX_DIR/runtime.conf" || recovery_status=1
+  [[ "$(file_hash "$MANAGED_CONF")" == "$TX_BEFORE_HASH" && "$(source_fingerprint)" == "$TX_SOURCES" ]] || recovery_status=1
+  return "$recovery_status"
 }
 
 apply_config() (
