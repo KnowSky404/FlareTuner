@@ -271,7 +271,8 @@ sysctl_sources() {
   local -A selected=()
   for dir in "$ETC_DIR/sysctl.d" "$SYSCTL_ROOT/run/sysctl.d" "$SYSCTL_ROOT/usr/local/lib/sysctl.d" "$SYSCTL_ROOT/usr/lib/sysctl.d" "$SYSCTL_ROOT/lib/sysctl.d"; do
     [[ ! -e "$dir" || ( -d "$dir" && -r "$dir" && -x "$dir" ) ]] || return 1
-    for file in "$dir"/*.conf; do
+    # procps also loads hidden filenames ending in .conf, including .conf itself.
+    for file in "$dir"/*.conf "$dir"/.*.conf "$dir"/.conf; do
       [[ -e "$file" || -L "$file" ]] || continue
       name="${file##*/}"
       [[ ! ${selected[$name]+yes} ]] || continue

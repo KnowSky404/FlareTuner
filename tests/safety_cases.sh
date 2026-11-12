@@ -647,7 +647,28 @@ test_safety_implicit_leaf_not_dumped() {
   assert_no_journal
 }
 
+test_safety_hidden_sysctl_sources() {
+  local name
+  for name in .provider.conf .conf; do
+    safety_fixture
+    echo 'net.ipv4.tcp_congestion_control = cubic' >"$safety_root/etc/sysctl.d/$name"
+    must_fail apply_config "$safety_config"
+    [[ ! -e "$MANAGED_CONF" ]] || fail 'hidden conflict published managed config'
+    assert_contains "$safety_error" "$name" 'hidden source reported'
+  done
+  safety_fixture
+  mkdir -p "$safety_root/usr/lib/sysctl.d"
+  echo 'net.core.default_qdisc = cake' >"$safety_root/usr/lib/sysctl.d/.provider.conf"
+  echo 'net.core.default_qdisc = fq' >"$safety_root/etc/sysctl.d/.provider.conf"
+  apply_config "$safety_config"
+  local before
+  before="$(source_fingerprint)"
+  echo 'net.core.default_qdisc = cake' >"$safety_root/etc/sysctl.d/.provider.conf"
+  [[ "$(source_fingerprint)" != "$before" ]] || fail 'hidden change missing from source fingerprint'
+}
+
 run_safety_tests() {
+  run_test 'hidden sysctl sources obey masking and enter fingerprints' test_safety_hidden_sysctl_sources
   run_test 'HTB implicit leaf may be absent from tc dump' test_safety_implicit_leaf_not_dumped
   run_test 'failed runtime write does not skip remaining recovery keys' test_safety_failed_runtime_write_continues_recovery
   run_test 'unexpected runtime drift prevents automatic recovery writes' test_safety_external_runtime_blocks_recovery
