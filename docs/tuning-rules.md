@@ -204,7 +204,7 @@ invalid state, never as an active verified limit.
 
 Status separates current TCP congestion control, BBR availability/module state,
 the system default qdisc parameter, managed file presence/runtime agreement,
-source conflicts, backup metadata, recorded tc metadata, actual device qdisc,
+source conflicts, managed-file digest drift, backup metadata, recorded tc metadata, actual device qdisc,
 active/stale/drifted tc state, and unfinished journals. A default of fq does not
 assert that device roots are fq. Private metadata may require root to inspect;
 preview remains read-only and never loads a module.

@@ -28,9 +28,10 @@ failed rollback, saved-runtime restore, damaged snapshots, symlink/hardlink/mode
 checks, all three tc creation failures, update/repeat/clear, reboot/missing/deleted
 queues, changed root/class/child/filter/ifindex, interface switching, legacy and
 corrupt metadata, INT/TERM/HUP, metadata-publication interruption, shared locking,
-and interactive apply/status/clear/failure paths.
+interactive apply/status/clear/failure paths, external managed-file deletion after
+reload, and failed restore with distinct on-disk and saved runtime values.
 
-Local verification passed: **64/64 cases**, all three syntax checks, and
+Local verification passed: **66/66 cases**, all three syntax checks, and
 `git diff --check`. Interactive tc apply/status/clear and failure paths were
 exercised with the same isolated fixtures. No profile values were changed.
 
