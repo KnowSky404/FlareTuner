@@ -103,7 +103,7 @@ First tc apply accepts only an unshaped `noqueue` root without classes/filters. 
 
 Full status may require root to read private state. It distinguishes the default qdisc parameter from the actual recorded device queue, active limits from stale metadata, and conflicts from unreadable state.
 
-The 71-case safety suite uses isolated files and simulated commands. An optional network-namespace harness passed ten real-kernel tc cases on Ubuntu. Real sysctl and production VPS acceptance remain outstanding. See the [v0.2.0 safety report](docs/runtime-safety-v020.md) for verification evidence, limitations, and follow-up acceptance. No Release is published by this change.
+The 72-case safety suite uses isolated files and simulated commands. An optional network-namespace harness passed ten real-kernel tc cases on Ubuntu. Real sysctl and production VPS acceptance remain outstanding. See the [v0.2.0 safety report](docs/runtime-safety-v020.md) for verification evidence, limitations, and follow-up acceptance. No Release is published by this change.
 
 ## AI Agent Notes
 

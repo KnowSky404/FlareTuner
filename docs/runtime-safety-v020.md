@@ -31,10 +31,11 @@ corrupt metadata, INT/TERM/HUP, metadata-publication interruption, shared lockin
 interactive apply/status/clear/failure paths, external managed-file deletion after
 reload, failed restore with distinct on-disk and saved runtime values, persistent
 reload errors that still restore saved keys, per-key restoration failures, external
-runtime drift, unrelated valid sysctl exclusions, and hidden implicit HTB leaves.
+runtime drift, unrelated valid sysctl exclusions, hidden sysctl source masking/
+fingerprints, and hidden implicit HTB leaves.
 The optional `tests/tc_netns_test.sh` adds ten real-kernel tc acceptance cases.
 
-Local verification passed: **71/71 cases**, all four syntax checks, and
+Local verification passed: **72/72 cases**, all four syntax checks, and
 `git diff --check`. Interactive tc apply/status/clear and failure paths were
 exercised with the same isolated fixtures. No profile values were changed.
 
@@ -49,7 +50,7 @@ bash tests/flaretuner_test.sh
 git diff --check
 ```
 
-The 71-case suite uses isolated filesystem and command mocks. The default sandbox
+The 72-case suite uses isolated filesystem and command mocks. The default sandbox
 has no CAP_NET_ADMIN/CAP_SYS_ADMIN, and its `unshare -Urn true` preflight fails.
 Authorized execution outside that sandbox has the required capabilities and passed
 **10/10 real-kernel tc cases** with:

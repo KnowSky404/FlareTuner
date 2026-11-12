@@ -65,7 +65,8 @@ The `qos-sensitive` path profile is intended for routes where bursts or sustaine
 FlareTuner inventories `/etc/sysctl.d`, `/run/sysctl.d`,
 `/usr/local/lib/sysctl.d`, `/usr/lib/sysctl.d`, and `/lib/sysctl.d`.
 For equal basenames, the first directory wins; selected files are sorted in
-C lexicographic order. A symlink to `/dev/null` masks a lower-priority file.
+C lexicographic order. Hidden names ending in `.conf` (including `.conf` itself)
+are included because procps loads them. A symlink to `/dev/null` masks a lower-priority file.
 Procps `sysctl --system` also loads `/etc/sysctl.conf` last. Systemd-sysctl
 uses sysctl.d files and does not read sysctl.conf directly; Debian/Ubuntu may
 supply a sysctl.d symlink to it. Boot services, unit overrides, and later
