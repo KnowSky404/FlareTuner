@@ -25,6 +25,7 @@ case "$1" in
       printf '%s\n' "$value" >"$r/runtime/$key"
     done <"$r/etc/sysctl.d/99-flaretuner.conf"
     fi
+    if [[ -f "$r/remove-config-system" ]]; then rm "$r/etc/sysctl.d/99-flaretuner.conf"; exit 1; fi
     if [[ -f "$r/drift-config" ]]; then echo '# external modification' >>"$r/etc/sysctl.d/99-flaretuner.conf"; exit 1; fi
     if [[ -f "$r/signal-system" ]]; then sig="$(cat "$r/signal-system")"; rm "$r/signal-system"; kill -"$sig" "$PPID"; fi
     if [[ -f "$r/fail-once-system" ]]; then rm "$r/fail-once-system"; exit 1; fi
@@ -462,6 +463,11 @@ test_safety_status() {
   local output
   output="$(show_status)"
   assert_contains "$output" 'Managed runtime: consistent' 'status consistent'
+  assert_contains "$output" 'Managed file ownership: consistent' 'status file digest'
+  echo '# external comment' >>"$MANAGED_CONF"
+  output="$(show_status)"
+  assert_contains "$output" 'Managed file ownership: drift' 'status managed file drift'
+  sed -i '$d' "$MANAGED_CONF"
   assert_contains "$output" 'TC egress limit: active and verified' 'status live tc'
   assert_contains "$output" 'not device root state' 'default is distinct from device qdisc'
   echo cubic >"$safety_root/runtime/net.ipv4.tcp_congestion_control"
@@ -555,7 +561,37 @@ test_safety_menu_paths() {
   assert_contains "$output" 'Operation failed or cancelled' 'menu error distinct from success'
 }
 
+test_safety_removed_config_keeps_runtime_evidence() {
+  safety_fixture
+  echo cubic >"$safety_root/runtime/net.ipv4.tcp_congestion_control"
+  touch "$safety_root/remove-config-system"
+  must_fail apply_config "$safety_config"
+  [[ ! -e "$MANAGED_CONF" && ! -e "$LATEST_BACKUP_FILE" ]] || fail 'external removal was overwritten'
+  assert_equals "$(cat "$safety_root/runtime/net.ipv4.tcp_congestion_control")" bbr 'runtime change remains visible for manual recovery'
+  assert_retained_journal
+}
+
+test_safety_restore_intermediate_config_values() {
+  safety_fixture
+  apply_config "$safety_config"
+  # The pre-B runtime snapshot intentionally differs from profile A on disk.
+  echo 1234 >"$safety_root/runtime/net.core.rmem_max"
+  local updated
+  updated="$(render_config low-memory under-512m under-100m conservative)"
+  apply_config "$updated"
+  cp "$MANAGED_CONF" "$safety_root/profile-b.conf"
+  cp "$LATEST_BACKUP_FILE" "$safety_root/metadata.before"
+  touch "$safety_root/fail-once-system"
+  must_fail restore_latest_backup
+  cmp -s "$MANAGED_CONF" "$safety_root/profile-b.conf" || fail 'failed restore did not recover profile B from intermediate A values'
+  cmp -s "$LATEST_BACKUP_FILE" "$safety_root/metadata.before" || fail 'failed restore changed latest metadata'
+  assert_equals "$(cat "$safety_root/runtime/net.core.rmem_max")" 4194304 'failed restore recovered profile B runtime'
+  assert_no_journal
+}
+
 run_safety_tests() {
+  run_test 'removed managed file cannot discard changed runtime evidence' test_safety_removed_config_keeps_runtime_evidence
+  run_test 'failed restore recognizes its intermediate configured values' test_safety_restore_intermediate_config_values
   run_test 'sysctl conflicting sysctl.conf refuses before publication' test_safety_sysctl_conflict
   run_test 'tc foreign root is never replaced' test_safety_tc_foreign
   run_test 'equal declarations and directory basename masking' test_safety_sysctl_same_and_masking

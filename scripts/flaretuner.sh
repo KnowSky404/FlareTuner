@@ -417,15 +417,22 @@ prepare_sysctl_transaction() {
 }
 
 rollback_sysctl() {
-  local key value current desired
+  local key value current desired reload_value
   safe_path "$MANAGED_CONF" || return 1
-  if [[ "$(file_hash "$MANAGED_CONF")" != "$TX_AFTER_HASH" && "$(file_hash "$MANAGED_CONF")" == "$TX_BEFORE_HASH" ]]; then return 0; fi
+  if [[ "$(file_hash "$MANAGED_CONF")" != "$TX_AFTER_HASH" && "$(file_hash "$MANAGED_CONF")" == "$TX_BEFORE_HASH" ]]; then
+    verify_config_runtime "$TX_DIR/runtime.conf"
+    return $?
+  fi
   [[ "$(file_hash "$MANAGED_CONF")" == "$TX_AFTER_HASH" && "$(source_fingerprint)" == "$TX_SOURCES" ]] || return 1
   # Refuse to restore a key another writer has changed to an unexpected value.
   while IFS=$'\t' read -r key value; do
     current="$(sysctl_get "$key" | normalize_value)" || return 1
     desired="$(config_entries "$TX_DIR/after.conf" | awk -F '\t' -v key="$key" '$1==key {print $2}')"
-    [[ "$current" == "$value" || "$current" == "$desired" ]] || return 1
+    reload_value=''
+    if [[ -f "$TX_DIR/restore.conf" ]]; then
+      reload_value="$(config_entries "$TX_DIR/restore.conf" | awk -F '\t' -v key="$key" '$1==key {print $2}')"
+    fi
+    [[ "$current" == "$value" || "$current" == "$desired" || ( -n "$reload_value" && "$current" == "$reload_value" ) ]] || return 1
   done < <(config_entries "$TX_DIR/runtime.conf")
   if [[ "$TX_BEFORE_HASH" == absent ]]; then rm -- "$MANAGED_CONF" || return 1;
   else atomic_publish "$TX_DIR/before.conf" "$MANAGED_CONF" || return 1; fi
@@ -746,6 +753,10 @@ show_status() {
   if [[ -e "$LATEST_BACKUP_FILE" || -L "$LATEST_BACKUP_FILE" ]]; then
     (
       load_backup_metadata
+      if [[ -n "$PARSED_APPLIED_HASH" ]]; then
+        if [[ "$(file_hash "$MANAGED_CONF")" == "$PARSED_APPLIED_HASH" ]]; then echo 'Managed file ownership: consistent';
+        else echo 'Managed file ownership: drift'; fi
+      else echo 'Managed file ownership: unverified legacy metadata'; fi
       if [[ "$PARSED_PREVIOUS_EXISTS" == 1 ]]; then echo "Latest backup: $PARSED_BACKUP_PATH";
       else echo 'Latest backup: none (previous state had no managed config)'; fi
     ) || echo 'Latest backup: invalid/unsafe metadata'
