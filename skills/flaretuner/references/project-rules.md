@@ -38,7 +38,8 @@ Apply:
 - Backs up the existing managed file, if any.
 - Writes only the managed sysctl file.
 - Runs `sysctl --system`.
-- Verifies active congestion control is `bbr` and default qdisc is `fq`.
+- Inspects sysctl source declarations and verifies every generated runtime key.
+- Uses a shared lock, atomic publication, private snapshots, and guarded recovery.
 - On failure, restores the previous managed state when possible and reruns `sysctl --system` best-effort.
 
 Restore:
@@ -52,9 +53,10 @@ TC egress limit:
 
 - Requires root.
 - Validates interface name and numeric Mbps.
-- Replaces the selected interface root qdisc.
+- First apply requires an unshaped noqueue root; foreign policy is refused.
+- Updates and clear verify live identity, shape, rate, filters and fingerprint.
 - Stores metadata at `/var/lib/flaretuner/tc-limit.env`.
-- Clears only the latest FlareTuner-recorded root qdisc.
+- Clears only the latest verified owned root; stale metadata never authorizes deletion.
 - Is runtime state and is not persisted across reboot by FlareTuner.
 
 ## Test Overrides
@@ -72,6 +74,9 @@ Use these instead of touching host state:
 - `FLARETUNER_MEMINFO`
 - `FLARETUNER_NET_CLASS_DIR`
 - `FLARETUNER_TC_CMD`
+- `FLARETUNER_SYSCTL_ROOT`
+- `FLARETUNER_BOOT_ID`
+- `FLARETUNER_STAT_CMD`
 
 ## Common Change Checklist
 

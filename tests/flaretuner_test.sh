@@ -13,14 +13,28 @@ cleanup() {
   unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR FLARETUNER_MEMINFO FLARETUNER_NET_CLASS_DIR
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE SELECTED_PATH_PROFILE SELECTED_TARGET_MBPS
   unset RECOMMENDED_WORKLOAD RECOMMENDED_MEMORY RECOMMENDED_BANDWIDTH RECOMMENDED_PROFILE RECOMMENDED_PATH_PROFILE RECOMMENDED_TARGET_MBPS
+  unset FLARETUNER_STAT_CMD FLARETUNER_SYSCTL_ROOT FLARETUNER_BOOT_ID
   unset -f sysctl modprobe lsmod id tc select_profile_inputs 2>/dev/null || true
 }
+
+# Simulate trusted root ownership while retaining real modes and link counts.
+# This keeps isolated regression fixtures usable by an unprivileged test runner.
+fixture_stat() {
+  local result
+  result="$(command stat "$@")" || return 1
+  printf '0 %s\n' "${result#* }"
+}
+
+fixture_root_id() { printf '0\n'; }
 
 reset_test_env() {
   unset FLARETUNER_TESTING FLARETUNER_OS_RELEASE FLARETUNER_SYSCTL_CMD FLARETUNER_MODPROBE_CMD FLARETUNER_LSMOD_CMD FLARETUNER_ID_CMD FLARETUNER_TC_CMD
   unset FLARETUNER_ETC_DIR FLARETUNER_STATE_DIR FLARETUNER_MEMINFO FLARETUNER_NET_CLASS_DIR
   unset SELECTED_WORKLOAD SELECTED_MEMORY SELECTED_BANDWIDTH SELECTED_PROFILE SELECTED_PATH_PROFILE SELECTED_TARGET_MBPS
   unset RECOMMENDED_WORKLOAD RECOMMENDED_MEMORY RECOMMENDED_BANDWIDTH RECOMMENDED_PROFILE RECOMMENDED_PATH_PROFILE RECOMMENDED_TARGET_MBPS
+  export FLARETUNER_STAT_CMD=fixture_stat
+  export FLARETUNER_SYSCTL_ROOT="$TEST_TMP_DIR/empty-system"
+  unset FLARETUNER_BOOT_ID
   unset -f sysctl modprobe lsmod id tc select_profile_inputs 2>/dev/null || true
 }
 
@@ -422,7 +436,7 @@ EOF
     if [[ "$1" == "--system" ]]; then
       return 0
     fi
-    return 1
+    if [[ "$1" == -n ]]; then mock_profile_value "$2"; else return 0; fi
   }
 
   id() {
@@ -472,7 +486,7 @@ EOF
     if [[ "$1" == "--system" ]]; then
       return 0
     fi
-    return 0
+    if [[ "$1" == -n ]]; then mock_profile_value "$2"; else return 0; fi
   }
 
   id() {
@@ -491,6 +505,7 @@ EOF
     FLARETUNER_ID_CMD=id \
     source "$SCRIPT"
 
+  seed_restore_evidence
   restore_latest_backup
 
   if [[ -e "$managed_conf" ]]; then
@@ -519,7 +534,7 @@ EOF
   } >"$state_dir/latest-backup.env"
 
   sysctl() {
-    [[ "$1" == "--system" ]]
+    if [[ "$1" == -n ]]; then mock_profile_value "$2"; else return 0; fi
   }
 
   id() {
@@ -538,6 +553,7 @@ EOF
     FLARETUNER_ID_CMD=id \
     source "$SCRIPT"
 
+  seed_restore_evidence
   restore_latest_backup
 
   assert_file_contains "$managed_conf" "previous config" "restore previous backup"
@@ -827,7 +843,7 @@ test_apply_restores_previous_file_when_sysctl_fails() {
 ID=ubuntu
 PRETTY_NAME="Ubuntu 24.04 LTS"
 EOF
-  printf 'previous config\n' >"$managed_conf"
+  printf '# Managed by FlareTuner 0.1.0\n# previous config\n' >"$managed_conf"
 
   sysctl() {
     if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_available_congestion_control" ]]; then
@@ -837,7 +853,7 @@ EOF
     if [[ "$1" == "--system" ]]; then
       return 1
     fi
-    return 1
+    if [[ "$1" == -n ]]; then mock_profile_value "$2"; else return 0; fi
   }
 
   id() {
@@ -880,7 +896,7 @@ test_apply_restores_previous_file_when_verification_fails() {
 ID=ubuntu
 PRETTY_NAME="Ubuntu 24.04 LTS"
 EOF
-  printf 'previous config\n' >"$managed_conf"
+  printf '# Managed by FlareTuner 0.1.0\n# previous config\n' >"$managed_conf"
 
   sysctl() {
     if [[ "$1" == "-n" && "$2" == "net.ipv4.tcp_available_congestion_control" ]]; then
@@ -898,7 +914,7 @@ EOF
     if [[ "$1" == "--system" ]]; then
       return 0
     fi
-    return 1
+    if [[ "$1" == -n ]]; then mock_profile_value "$2"; else return 0; fi
   }
 
   id() {
@@ -930,41 +946,10 @@ EOF
 }
 
 test_apply_tc_egress_limit_records_metadata_and_commands() {
-  local root state_dir log_file
-  root="$TEST_TMP_DIR/tc-apply"
-  state_dir="$root/state"
-  log_file="$root/tc.log"
-  mkdir -p "$state_dir"
-
-  tc() {
-    printf '%s\n' "$*" >>"$log_file"
-    return 0
-  }
-
-  id() {
-    if [[ "$1" == "-u" ]]; then
-      echo "0"
-      return 0
-    fi
-    return 1
-  }
-
-  FLARETUNER_TESTING=1 \
-    FLARETUNER_STATE_DIR="$state_dir" \
-    FLARETUNER_TC_CMD=tc \
-    FLARETUNER_ID_CMD=id \
-    source "$SCRIPT"
-
+  safety_fixture
   apply_tc_egress_limit eth0 90
-
-  local log metadata
-  log="$(<"$log_file")"
-  metadata="$(<"$state_dir/tc-limit.env")"
-  assert_contains "$log" "qdisc replace dev eth0 root handle 1: htb default 10" "tc root qdisc command"
-  assert_contains "$log" "class replace dev eth0 parent 1: classid 1:10 htb rate 90mbit ceil 90mbit" "tc rate class command"
-  assert_contains "$log" "qdisc replace dev eth0 parent 1:10 handle 10: fq" "tc fq child command"
-  assert_contains "$metadata" "IFACE=eth0" "tc metadata iface"
-  assert_contains "$metadata" "RATE_MBPS=90" "tc metadata rate"
+  assert_file_contains "$safety_root/tc.log" 'qdisc add dev eth0 root handle 1: htb default 10' 'tc first root uses add'
+  assert_file_contains "$TC_LIMIT_FILE" 'RATE_MBPS=90' 'verified metadata rate'
 }
 
 test_apply_tc_egress_limit_rejects_unsafe_iface() {
@@ -1002,44 +987,14 @@ test_apply_tc_egress_limit_rejects_unsafe_iface() {
 }
 
 test_clear_tc_egress_limit_uses_metadata() {
-  local root state_dir log_file
-  root="$TEST_TMP_DIR/tc-clear"
-  state_dir="$root/state"
-  log_file="$root/tc.log"
-  mkdir -p "$state_dir"
-  cat >"$state_dir/tc-limit.env" <<'EOF'
-IFACE=eth0
-RATE_MBPS=90
-EOF
-
-  tc() {
-    printf '%s\n' "$*" >>"$log_file"
-    return 0
-  }
-
-  id() {
-    if [[ "$1" == "-u" ]]; then
-      echo "0"
-      return 0
-    fi
-    return 1
-  }
-
-  FLARETUNER_TESTING=1 \
-    FLARETUNER_STATE_DIR="$state_dir" \
-    FLARETUNER_TC_CMD=tc \
-    FLARETUNER_ID_CMD=id \
-    source "$SCRIPT"
-
+  safety_fixture
+  apply_tc_egress_limit eth0 90
   clear_tc_egress_limit
-
-  local log
-  log="$(<"$log_file")"
-  assert_contains "$log" "qdisc del dev eth0 root" "tc clear command"
-  if [[ -e "$state_dir/tc-limit.env" ]]; then
-    fail "tc metadata should be removed after clearing"
-  fi
+  assert_file_contains "$safety_root/tc.log" 'qdisc del dev eth0 root handle 1:' 'tc clear verified root'
+  [[ ! -e "$TC_LIMIT_FILE" ]] || fail 'tc metadata not removed'
 }
+
+source "$ROOT_DIR/tests/safety_cases.sh"
 
 run_test "render low-memory conservative config" test_render_low_memory_config
 run_test "render high-throughput aggressive config" test_render_high_throughput_config
@@ -1073,4 +1028,5 @@ run_test "apply tc egress limit records metadata and commands" test_apply_tc_egr
 run_test "apply tc egress limit rejects unsafe iface" test_apply_tc_egress_limit_rejects_unsafe_iface
 run_test "clear tc egress limit uses metadata" test_clear_tc_egress_limit_uses_metadata
 
+run_safety_tests
 echo "Passed $pass_count tests"

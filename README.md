@@ -4,9 +4,9 @@ FlareTuner is an interactive Bash script for conservative network tuning on Debi
 
 The project is intentionally small: one Bash script, one shell test runner, and Markdown documentation. It does not install kernels, benchmark the network, or try to tune BBRv2.
 
-## MVP Scope
+## Scope
 
-The script MVP supports:
+The v0.2.0 safety candidate supports:
 
 - Debian and Ubuntu only.
 - Previewing a generated tuning profile.
@@ -26,7 +26,7 @@ Non-goals for this MVP:
 ## Repository Map
 
 - `scripts/flaretuner.sh` - interactive CLI and all runtime behavior.
-- `tests/flaretuner_test.sh` - shell tests using environment overrides and temp directories.
+- `tests/flaretuner_test.sh` and `tests/safety_cases.sh` - isolated shell tests and stateful failure fixtures.
 - `docs/tuning-rules.md` - detailed tuning inputs, generated settings, safety rules, and rollback model.
 - `AGENTS.md` - working instructions for Codex, Hermes-style agents, and other AI coding agents.
 - `skills/flaretuner/` - project skill for agents that can load repo-local skills.
@@ -51,18 +51,18 @@ Preview and status can run without root. The menu can preview tuning, apply tuni
 
 Menu items:
 
-1. `Generate and apply tuning` - generates a profile, asks for confirmation, writes the managed sysctl file, runs `sysctl --system`, and verifies active `bbr` plus `fq`.
+1. `Generate and apply tuning` - generates a profile, asks for confirmation, writes the managed sysctl file, checks configuration sources, runs `sysctl --system`, and verifies every generated runtime value.
 2. `Preview tuning only` - renders the profile and current status without writing files or loading kernel modules.
 3. `Restore last FlareTuner backup` - restores or removes only the FlareTuner-managed sysctl file from the latest metadata.
 4. `Show current network tuning status` - prints OS, kernel, BBR, qdisc, managed config, backup, and tc limit state.
 5. `Apply tc egress bandwidth limit` - applies a runtime interface-wide egress limit with `tc`.
-6. `Clear FlareTuner tc egress limit` - removes the latest FlareTuner-recorded root qdisc from the recorded interface.
+6. `Clear FlareTuner tc egress limit` - verifies live ownership before removing the managed root qdisc; stale metadata alone never authorizes deletion.
 
 When generating a profile, FlareTuner reads local system information to recommend defaults for workload, memory tier, bandwidth tier, path profile, and tuning profile. Press Enter to accept each recommended value, or enter a menu number to override it manually. The recommendation is intentionally simple: it reads `/proc/meminfo` for memory size and `/sys/class/net/*/speed` for interface speed where available. It does not run speed tests or contact cloud provider metadata services.
 
 You can enter an optional target bandwidth in Mbps before choosing the profile inputs. This value changes the generated sysctl recommendation tier, but it is not an actual traffic shaper. For example, entering `90` can make the sysctl profile stay conservative for a route that becomes unstable above 100 Mbps, but FlareTuner does not enforce a 90 Mbps cap in this MVP.
 
-For real server-to-client egress shaping, use the `Apply tc egress bandwidth limit` menu item as root. It asks for an interface such as `eth0` and a numeric Mbps rate, then installs a FlareTuner-managed root qdisc on that interface. This is runtime state: it is not persisted across reboot by FlareTuner. Clearing the FlareTuner tc limit uses the metadata stored under `/var/lib/flaretuner/` and removes the root qdisc from the recorded interface.
+For real server-to-client egress shaping, use the `Apply tc egress bandwidth limit` menu item as root. It asks for an interface such as `eth0` and a numeric Mbps rate, then installs a FlareTuner-managed root qdisc on that interface. This is runtime state: it is not persisted across reboot by FlareTuner. Clearing verifies protected metadata against the live interface identity, qdisc/class/filter state, and recorded configuration fingerprint. A missing managed qdisc only causes stale metadata cleanup; external policy is preserved.
 
 ## Profile Inputs
 
@@ -93,11 +93,17 @@ Backup metadata and backups are stored under:
 /var/lib/flaretuner/
 ```
 
-The restore menu restores the latest FlareTuner-managed backup. If no previous managed file existed, restore removes the managed file. Apply failures trigger restoration of the previous managed file when possible.
+Before sysctl apply, FlareTuner checks declarations in `/etc/sysctl.conf` and the procps/systemd sysctl directories. Equal declarations are reported; different values, relevant globs, unknown syntax, foreign reserved basenames, and managed-file drift refuse application. Other tools' files are never edited or migrated. See [tuning rules](docs/tuning-rules.md#sysctl-source-ownership) for loading and conflict boundaries.
 
-Apply and restore run `sysctl --system`, which reloads system sysctl configuration broadly. FlareTuner still only writes, restores, or removes its managed file.
+Apply and restore require root and Debian/Ubuntu. They use a shared local `flock`, private snapshots, and atomic file replacement. Every generated runtime key is verified. Reapplying identical configuration with matching runtime skips config writes, backups, and reload. Restore checks the applied file digest, snapshot digests, runtime, and other configuration sources before restoring the latest saved file/runtime state.
 
-The optional `tc` egress limiter replaces the root qdisc on the chosen interface. Do not use it on an interface where you already maintain custom `tc` policy unless you are prepared for FlareTuner to replace that root qdisc.
+Apply and restore still run `sysctl --system`, which reloads system configuration broadly. Recovery covers the managed file and snapshotted keys; it cannot undo every unrelated system effect or exclude arbitrary privileged writers. Failed operations return nonzero. Uncertain or failed rollback preserves a private `transaction.*` journal under `/var/lib/flaretuner/` and blocks further mutations until manual recovery. See [recovery instructions](docs/tuning-rules.md#transaction-and-recovery-boundaries).
+
+First tc apply accepts only an unshaped `noqueue` root without classes/filters. It refuses existing custom queues, including queues whose ownership is uncertain. Updates change only a verified owned class; switching interfaces requires clearing the previous limit first. No tc state is persisted across reboot. Older metadata without ownership/runtime evidence requires manual inspection, rather than automatic deletion or restore.
+
+Full status may require root to read private state. It distinguishes the default qdisc parameter from the actual recorded device queue, active limits from stale metadata, and conflicts from unreadable state.
+
+The safety suite uses isolated files and simulated commands; it does not establish real-kernel or production VPS acceptance. See the [v0.2.0 safety report](docs/runtime-safety-v020.md) for verification evidence, limitations, and follow-up acceptance. No Release is published by this change.
 
 ## AI Agent Notes
 
