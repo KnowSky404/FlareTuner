@@ -25,13 +25,17 @@ case "$1" in
       printf '%s\n' "$value" >"$r/runtime/$key"
     done <"$r/etc/sysctl.d/99-flaretuner.conf"
     fi
+    if [[ -f "$r/drift-runtime-system" ]]; then echo reno >"$r/runtime/net.ipv4.tcp_congestion_control"; exit 1; fi
     if [[ -f "$r/remove-config-system" ]]; then rm "$r/etc/sysctl.d/99-flaretuner.conf"; exit 1; fi
     if [[ -f "$r/drift-config" ]]; then echo '# external modification' >>"$r/etc/sysctl.d/99-flaretuner.conf"; exit 1; fi
     if [[ -f "$r/signal-system" ]]; then sig="$(cat "$r/signal-system")"; rm "$r/signal-system"; kill -"$sig" "$PPID"; fi
+    if [[ -f "$r/fail-after-system" ]]; then exit 1; fi
     if [[ -f "$r/fail-once-system" ]]; then rm "$r/fail-once-system"; exit 1; fi
     if [[ -f "$r/hold" ]]; then touch "$r/ready"; read -r _ <"$r/release"; fi
     ;;
-  -w) printf '%s\n' "${2#*=}" >"$r/runtime/${2%%=*}" ;;
+  -w)
+    if [[ -f "$r/fail-write-key" && "${2%%=*}" == "$(cat "$r/fail-write-key")" ]]; then exit 1; fi
+    printf '%s\n' "${2#*=}" >"$r/runtime/${2%%=*}" ;;
   *) exit 1 ;;
 esac
 MOCK
@@ -589,7 +593,51 @@ test_safety_restore_intermediate_config_values() {
   assert_no_journal
 }
 
+test_safety_persistent_reload_restores_runtime() {
+  safety_fixture
+  echo cubic >"$safety_root/runtime/net.ipv4.tcp_congestion_control"
+  touch "$safety_root/fail-after-system"
+  must_fail apply_config "$safety_config"
+  assert_equals "$(cat "$safety_root/runtime/net.ipv4.tcp_congestion_control")" cubic 'persistent reload failure still restores saved keys'
+  assert_file_contains "$safety_root/sysctl.log" '-w net.ipv4.tcp_congestion_control=cubic' 'saved runtime write attempted'
+  [[ ! -e "$MANAGED_CONF" ]] || fail 'persistent reload failure did not restore managed file state'
+  assert_retained_journal
+}
+
+test_safety_unrelated_exclusion() {
+  safety_fixture
+  printf '%s\n' '  -net.ipv4.conf.all.rp_filter  ' >"$safety_root/etc/sysctl.d/50-default.conf"
+  apply_config "$safety_config"
+  assert_file_contains "$MANAGED_CONF" 'net.core.default_qdisc = fq' 'valid unrelated exclusion permits apply'
+}
+
+test_safety_failed_runtime_write_continues_recovery() {
+  safety_fixture
+  echo 1234 >"$safety_root/runtime/net.core.rmem_max"
+  echo 4321 >"$safety_root/runtime/net.core.wmem_max"
+  touch "$safety_root/fail-after-system"
+  echo net.core.rmem_max >"$safety_root/fail-write-key"
+  must_fail apply_config "$safety_config"
+  assert_equals "$(cat "$safety_root/runtime/net.core.wmem_max")" 4321 'recovery continues after another key fails'
+  assert_equals "$(cat "$safety_root/runtime/net.core.rmem_max")" 16777216 'failed key stays visible for manual recovery'
+  assert_retained_journal
+}
+
+test_safety_external_runtime_blocks_recovery() {
+  safety_fixture
+  echo cubic >"$safety_root/runtime/net.ipv4.tcp_congestion_control"
+  touch "$safety_root/drift-runtime-system"
+  must_fail apply_config "$safety_config"
+  assert_equals "$(cat "$safety_root/runtime/net.ipv4.tcp_congestion_control")" reno 'unexpected runtime change preserved'
+  if grep -q -- '^-w ' "$safety_root/sysctl.log"; then fail 'recovery overwrote externally drifted runtime'; fi
+  assert_retained_journal
+}
+
 run_safety_tests() {
+  run_test 'failed runtime write does not skip remaining recovery keys' test_safety_failed_runtime_write_continues_recovery
+  run_test 'unexpected runtime drift prevents automatic recovery writes' test_safety_external_runtime_blocks_recovery
+  run_test 'persistent reload failure still restores saved managed runtime' test_safety_persistent_reload_restores_runtime
+  run_test 'unrelated valid sysctl exclusion permits apply' test_safety_unrelated_exclusion
   run_test 'removed managed file cannot discard changed runtime evidence' test_safety_removed_config_keeps_runtime_evidence
   run_test 'failed restore recognizes its intermediate configured values' test_safety_restore_intermediate_config_values
   run_test 'sysctl conflicting sysctl.conf refuses before publication' test_safety_sysctl_conflict

@@ -29,9 +29,11 @@ checks, all three tc creation failures, update/repeat/clear, reboot/missing/dele
 queues, changed root/class/child/filter/ifindex, interface switching, legacy and
 corrupt metadata, INT/TERM/HUP, metadata-publication interruption, shared locking,
 interactive apply/status/clear/failure paths, external managed-file deletion after
-reload, and failed restore with distinct on-disk and saved runtime values.
+reload, failed restore with distinct on-disk and saved runtime values, persistent
+reload errors that still restore saved keys, per-key restoration failures, external
+runtime drift, and unrelated valid sysctl exclusions.
 
-Local verification passed: **66/66 cases**, all three syntax checks, and
+Local verification passed: **70/70 cases**, all three syntax checks, and
 `git diff --check`. Interactive tc apply/status/clear and failure paths were
 exercised with the same isolated fixtures. No profile values were changed.
 
@@ -47,7 +49,7 @@ git diff --check
 
 These are mock/filesystem tests, not production network validation. The test
 fixtures redirect all sysctl and tc writes, source directories, state and sysfs.
-The current process has neither CAP_NET_ADMIN nor CAP_SYS_ADMIN. A read-only
+The current process has neither CAP_NET_ADMIN nor CAP_SYS_ADMIN. An isolation
 `unshare -Urn true` preflight fails at uid_map with Operation not permitted.
 No real-kernel shaping or sysctl reload was attempted on this VPS.
 

@@ -76,12 +76,13 @@ Sources: [procps sysctl(8)](https://man7.org/linux/man-pages/man8/sysctl.8.html)
 and [systemd sysctl.d](https://github.com/systemd/systemd/blob/main/man/sysctl.d.xml).
 
 The scanner distinguishes no overlap, equal literal assignments, different
-assignments, tool-management markers, and unknown sources/syntax. Slash aliases
+assignments, tool-management markers, and unknown sources/syntax. Valid exclusion
+rules unrelated to managed keys are ignored; relevant exclusions remain uncertain. Slash aliases
 of the managed keys and optional leading assignment `-` are normalized.
 Management markers are diagnostic hints, not proof of the other tool's identity.
 
 A different assignment in any selected file refuses apply, even if another
-selected file would override it today. Relevant globs, exclusion/unknown syntax,
+selected file would override it today. Relevant globs, relevant exclusions/unknown syntax,
 unreadable files, aliases of the managed file, and vendor files with the reserved
 `99-flaretuner.conf` basename also refuse apply. Equal literal declarations are
 reported and allowed. This deliberately avoids relying on a particular boot
@@ -173,7 +174,9 @@ Sysctl failure recovery checks the written managed digest, selected source
 fingerprint, and current key values against the intended and saved values.
 Unexpected external changes refuse rollback. Otherwise it restores/removes the
 managed file, reloads `sysctl --system`, reapplies saved managed runtime values,
-and verifies them. It does not restore unrelated kernel keys, unloaded modules,
+and verifies them. A reload error is recorded but does not skip guarded restoration
+of saved managed values; the journal is retained and the operation returns failure.
+It does not restore unrelated kernel keys, unloaded modules,
 or arbitrary effects of a broad reload. Restore similarly validates snapshot
 paths/digests, current file/runtime ownership, and source conflicts before acting;
 a failed restore attempts to recover the pre-restore state. A successful restore
