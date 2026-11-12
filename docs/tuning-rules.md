@@ -60,51 +60,159 @@ The `high-latency` path profile is intended for cross-region or high-RTT paths. 
 
 The `qos-sensitive` path profile is intended for routes where bursts or sustained throughput above a threshold appear to trigger throttling. It keeps socket buffers, connection backlog values, and device backlog more conservative. This can reduce aggressive buffering, but it does not shape traffic or guarantee that throughput remains under a provider or network QoS threshold.
 
+## Sysctl Source Ownership
+
+FlareTuner inventories `/etc/sysctl.d`, `/run/sysctl.d`,
+`/usr/local/lib/sysctl.d`, `/usr/lib/sysctl.d`, and `/lib/sysctl.d`.
+For equal basenames, the first directory wins; selected files are sorted in
+C lexicographic order. A symlink to `/dev/null` masks a lower-priority file.
+Procps `sysctl --system` also loads `/etc/sysctl.conf` last. Systemd-sysctl
+uses sysctl.d files and does not read sysctl.conf directly; Debian/Ubuntu may
+supply a sysctl.d symlink to it. Boot services, unit overrides, and later
+privileged writers can change the outcome. A filename alone proves no final
+runtime value.
+
+Sources: [procps sysctl(8)](https://man7.org/linux/man-pages/man8/sysctl.8.html)
+and [systemd sysctl.d](https://github.com/systemd/systemd/blob/main/man/sysctl.d.xml).
+
+The scanner distinguishes no overlap, equal literal assignments, different
+assignments, tool-management markers, and unknown sources/syntax. Slash aliases
+of the managed keys and optional leading assignment `-` are normalized.
+Management markers are diagnostic hints, not proof of the other tool's identity.
+
+A different assignment in any selected file refuses apply, even if another
+selected file would override it today. Relevant globs, exclusion/unknown syntax,
+unreadable files, aliases of the managed file, and vendor files with the reserved
+`99-flaretuner.conf` basename also refuse apply. Equal literal declarations are
+reported and allowed. This deliberately avoids relying on a particular boot
+loader to settle disagreements; it does not implement an arbitrary sysctl parser
+or claim to predict all future writers. Files masked by higher-priority basenames
+are not treated as loaded declarations.
+
+The managed path must be absent or a trusted regular file with the FlareTuner
+header. Once new backup metadata exists, its applied digest must still match.
+A sing-box-vps declaration in `/etc/sysctl.conf` is reported in the same way:
+equal is allowed, different refuses apply. FlareTuner never deletes or takes over
+those declarations. No cross-project migration is implemented.
+
+Apply snapshots all ten generated runtime keys before publication. Success
+requires every active value to match, including queues and TCP buffer triples.
+Identical file and runtime values skip publication, backup, module loading, and
+reload. Runtime drift requires a verified apply; file drift refuses overwrite.
+The tuning numbers and profile mapping are unchanged.
+
 ## Traffic Control Limits
 
-FlareTuner can optionally apply a runtime `tc` egress bandwidth limit to a selected interface. This is intended for server-to-client return traffic, for example a Japan VPS sending proxy traffic back to a client where rates above a threshold trigger QoS.
+The limiter remains interface-wide egress HTB plus fq, root-only, runtime-only,
+and Debian/Ubuntu-only. No ingress, IFB, per-user, per-destination, persistence,
+or application-account policy is added. Rates are integer Mbps, 1 to 9999999;
+leading zeros are rejected to avoid ambiguous shell arithmetic.
 
-The current limiter is interface-wide egress shaping:
+Before any kernel mutation, FlareTuner verifies the interface exists, reads its
+ifindex and boot identity, and inspects qdiscs, classes, and filters at root and
+the managed parents. First apply accepts only one `noqueue 0:` root with no
+classes/filters. Existing fq, fq_codel, mq, CAKE, HTB, ingress/clsact, custom
+classes, and uncertain queues are refused, even when some might be kernel defaults.
+There is no generic qdisc serializer or automatic external-policy restoration.
 
-- It requires root.
-- It validates the interface name and numeric Mbps value before running `tc`.
-- It replaces the selected interface root qdisc with an `htb` class at the requested rate and attaches `fq` below that class.
-- It stores FlareTuner metadata at `/var/lib/flaretuner/tc-limit.env`.
-- It can clear only the latest FlareTuner-recorded tc limit.
-- It is runtime state and is not persisted across reboot by FlareTuner.
+Creation uses root `add`, class `add`, then attaches fq to the new class. Linux
+HTB automatically creates a pfifo leaf for a new class; only that verified
+intermediate leaf is replaced. Every command and intermediate topology is
+checked. Unknown output or a command that fails after changing state retains
+a recovery journal rather than deleting an unverified root. This intermediate
+behavior is derived from [Linux HTB](https://github.com/torvalds/linux/blob/master/net/sched/sch_htb.c)
+and still needs target-kernel acceptance.
 
-The limiter does not handle ingress shaping, IFB devices, per-user limits, per-destination limits, or proxy-application account limits. It also cannot control the client-to-server direction from the server, because TCP rate control primarily applies at the sender.
+After full verification, metadata records interface, rate, boot/ifindex identity,
+and a SHA-256 fingerprint of the normalized qdisc/class/filter configuration.
+Volatile HTB direct-packet and qdisc reference counters are excluded. Metadata
+is published atomically with mode 600. The fingerprint is a protected local
+ownership record, not a kernel owner tag or cryptographic proof against root.
 
-## Rollback Model
+A matching repeat changes nothing. An update preserves the root/fq topology
+and changes only the owned HTB class. Failure restores the previous class rate
+only when the last verified full fingerprint still matches, then verifies the
+previous fingerprint. A failed first apply deletes only a last-verified owned
+partial tree and checks the original baseline afterward. Metadata commit failure
+uses the same recovery path.
 
-FlareTuner writes only this managed sysctl file:
+Clear compares identity, shape, rate, fingerprint, and filters before deleting
+`root handle 1:`. A missing interface or a lone default handle-zero root with no
+classes/filters permits metadata-only stale cleanup. This handles reboot and
+externally deleted queues without deleting their replacement. Other changed
+queues/classes/filters refuse clear/update and retain metadata. Repeated clear
+is harmless. Clear the old interface before applying to another interface.
+Legacy two-field metadata cannot establish ownership and requires manual inspection.
 
-```text
-/etc/sysctl.d/99-flaretuner.conf
-```
+## Transaction and Recovery Boundaries
 
-It stores latest backup metadata at:
+Paths remain:
 
-```text
-/var/lib/flaretuner/latest-backup.env
-```
+- Managed configuration: `/etc/sysctl.d/99-flaretuner.conf`.
+- Latest sysctl backup metadata: `/var/lib/flaretuner/latest-backup.env`.
+- Unique config/runtime snapshots: `/var/lib/flaretuner/backup/`.
+- Latest tc metadata: `/var/lib/flaretuner/tc-limit.env`.
+- Shared lock: `/var/lib/flaretuner/.lock`.
+- Private in-flight/recovery journal: `/var/lib/flaretuner/transaction.*`.
 
-Backups are stored under:
+Use local storage for state and a filesystem supporting `flock` and atomic rename.
+Mutation paths and their ancestors must be root-owned and not group/world writable;
+symlinks, special files, and multiply linked regular files are rejected. A sticky
+`/tmp` ancestor is allowed for isolated tests. New files use mode 600, new state
+and transaction directories use mode 700, and backup names use `mktemp`.
+Existing root-owned non-writable directories may retain mode 755.
 
-```text
-/var/lib/flaretuner/backup/
-```
+Mutations share one nonblocking lock, so sysctl apply/restore and tc apply/clear
+cannot race each other. Config and metadata use same-directory temporary files
+and rename. SIGINT, SIGTERM, and SIGHUP exit through guarded recovery. Bash does
+not provide a kernel transaction: each tc/sysctl command is a separate operation.
+There is no fsync/power-loss durability guarantee. SIGKILL or power loss can leave
+a journal, temporary files, and partial state; the next mutation refuses to run.
 
-Optional tc limit metadata is stored at:
+Sysctl failure recovery checks the written managed digest, selected source
+fingerprint, and current key values against the intended and saved values.
+Unexpected external changes refuse rollback. Otherwise it restores/removes the
+managed file, reloads `sysctl --system`, reapplies saved managed runtime values,
+and verifies them. It does not restore unrelated kernel keys, unloaded modules,
+or arbitrary effects of a broad reload. Restore similarly validates snapshot
+paths/digests, current file/runtime ownership, and source conflicts before acting;
+a failed restore attempts to recover the pre-restore state. A successful restore
+consumes latest metadata, retaining historical snapshot files.
 
-```text
-/var/lib/flaretuner/tc-limit.env
-```
+Errors return nonzero; unsafe/failed recovery returns 2 from the operation.
+The interactive menu remembers failures/cancellations and exits nonzero even if
+the user subsequently selects Exit. It keeps all seven existing menu choices.
 
-Restore uses the latest FlareTuner metadata to restore or remove only the FlareTuner-managed sysctl file. If a previous managed file existed, restore copies that backup back to `/etc/sysctl.d/99-flaretuner.conf`. If no previous managed file existed, restore removes `/etc/sysctl.d/99-flaretuner.conf`.
+If recovery is unsafe or fails, do not blindly delete the journal or run a root
+qdisc deletion. As root, inspect the reported journal, `show status`, current
+sysctl sources/runtime, and `tc qdisc/class/filter show` for the recorded interface.
+Compare before/current snapshots, operation, intended config, runtime snapshots,
+and metadata. Resolve the discrepancy manually during an appropriate maintenance
+window; for tc there may be no safely reconstructable previous external tree.
+After independently verifying the desired managed and runtime state, archive the
+journal and recovery evidence outside the `transaction.*` pattern. Only then can
+new mutations proceed. No automatic recovery command is provided in this version.
 
-## Apply Safety
+Checks narrow races with unrelated privileged writers but cannot eliminate the
+read/check/write window or identify an identical external replacement. Coordinate
+network management tools; the FlareTuner lock is cooperative, not a host-wide lock.
+Read-only status does not acquire the mutation lock and can observe an in-flight
+transition. Missing permissions or unsupported output is reported as unknown or
+invalid state, never as an active verified limit.
 
-When apply mode writes a generated configuration, it runs `sysctl --system` and verifies that active congestion control is `bbr` and active default qdisc is `fq`. If applying or verification fails, FlareTuner attempts to restore the previous managed file and re-run `sysctl --system`.
+## Status and Validation
 
-The restore menu can also be used to restore the latest FlareTuner-managed backup.
+Status separates current TCP congestion control, BBR availability/module state,
+the system default qdisc parameter, managed file presence/runtime agreement,
+source conflicts, backup metadata, recorded tc metadata, actual device qdisc,
+active/stale/drifted tc state, and unfinished journals. A default of fq does not
+assert that device roots are fq. Private metadata may require root to inspect;
+preview remains read-only and never loads a module.
+
+The required syntax checks and shell suite run with isolated directory/command
+overrides. `FLARETUNER_SYSCTL_ROOT` redirects runtime/vendor source directories;
+`FLARETUNER_BOOT_ID` redirects boot identity and `FLARETUNER_STAT_CMD` permits
+mocking root ownership while preserving real modes/link counts in fixtures, alongside existing
+etc/state/sysfs/sysctl/tc overrides. No mock invokes host sysctl writes or changes
+host qdiscs. See [runtime safety report](runtime-safety-v020.md) for the evidence
+boundary and the remaining disposable-VPS acceptance.
