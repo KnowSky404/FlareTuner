@@ -117,12 +117,14 @@ classes, and uncertain queues are refused, even when some might be kernel defaul
 There is no generic qdisc serializer or automatic external-policy restoration.
 
 Creation uses root `add`, class `add`, then attaches fq to the new class. Linux
-HTB automatically creates a pfifo leaf for a new class; only that verified
-intermediate leaf is replaced. Every command and intermediate topology is
+HTB automatically creates a pfifo leaf for a new class; only the default leaf of that newly created, verified
+class is replaced; kernels may omit an implicit handle-zero leaf
+from qdisc dumps. Both absent and explicit pfifo intermediate dumps are accepted
+only in the fresh owned class. Every command and intermediate topology is
 checked. Unknown output or a command that fails after changing state retains
 a recovery journal rather than deleting an unverified root. This intermediate
 behavior is derived from [Linux HTB](https://github.com/torvalds/linux/blob/master/net/sched/sch_htb.c)
-and still needs target-kernel acceptance.
+and has been checked by the optional isolated tc kernel harness on Ubuntu.
 
 After full verification, metadata records interface, rate, boot/ifindex identity,
 and a SHA-256 fingerprint of the normalized qdisc/class/filter configuration.
@@ -217,5 +219,7 @@ overrides. `FLARETUNER_SYSCTL_ROOT` redirects runtime/vendor source directories;
 `FLARETUNER_BOOT_ID` redirects boot identity and `FLARETUNER_STAT_CMD` permits
 mocking root ownership while preserving real modes/link counts in fixtures, alongside existing
 etc/state/sysfs/sysctl/tc overrides. No mock invokes host sysctl writes or changes
-host qdiscs. See [runtime safety report](runtime-safety-v020.md) for the evidence
+host qdiscs. The optional root-only `tests/tc_netns_test.sh` separately validates
+ten real tc paths inside a guarded fresh network/mount namespace with a private
+veth pair; it never performs a real sysctl reload. See [runtime safety report](runtime-safety-v020.md) for the evidence
 boundary and the remaining disposable-VPS acceptance.

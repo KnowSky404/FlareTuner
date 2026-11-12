@@ -60,11 +60,11 @@ case "$1 $2" in
         else sed -i '/qdisc pfifo /d' "$q"; echo 'qdisc fq 10: parent 1:10 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms' >>"$q"; fi ;;
       'class add'|'class change')
         echo "class htb 1:10 root rate ${11%mbit}Mbit ceil ${13%mbit}Mbit burst 1600b cburst 1600b" >"$c"
-        if [[ "$2" == add ]]; then echo 'qdisc pfifo 8001: parent 1:10 limit 1000p' >>"$q"; fi ;;
+        if [[ "$2" == add && ! -f "$r/hide-pfifo" ]]; then echo 'qdisc pfifo 8001: parent 1:10 limit 1000p' >>"$q"; fi ;;
       'qdisc del')
         [[ ! -f "$r/fail-delete" ]] || exit 1
         echo 'qdisc noqueue 0: root refcnt 2' >"$q"; : >"$c"
-        if [[ "$2" == add ]]; then echo 'qdisc pfifo 8001: parent 1:10 limit 1000p' >>"$q"; fi ;;
+        if [[ "$2" == add && ! -f "$r/hide-pfifo" ]]; then echo 'qdisc pfifo 8001: parent 1:10 limit 1000p' >>"$q"; fi ;;
       *) exit 1 ;;
     esac
     if [[ -f "$r/drift-step" && "$step" == "$(cat "$r/drift-step")" ]]; then echo 'qdisc cake 8001: root bandwidth unlimited' >"$q"; exit 1; fi
@@ -633,7 +633,22 @@ test_safety_external_runtime_blocks_recovery() {
   assert_retained_journal
 }
 
+test_safety_implicit_leaf_not_dumped() {
+  safety_fixture
+  touch "$safety_root/hide-pfifo"
+  apply_tc_egress_limit eth0 90
+  clear_tc_egress_limit
+  assert_no_journal
+  safety_fixture
+  touch "$safety_root/hide-pfifo"
+  echo 3 >"$safety_root/fail-step"
+  must_fail apply_tc_egress_limit eth0 90
+  assert_file_contains "$safety_root/eth0.qdisc" 'noqueue 0:' 'invisible implicit leaf failure rollback'
+  assert_no_journal
+}
+
 run_safety_tests() {
+  run_test 'HTB implicit leaf may be absent from tc dump' test_safety_implicit_leaf_not_dumped
   run_test 'failed runtime write does not skip remaining recovery keys' test_safety_failed_runtime_write_continues_recovery
   run_test 'unexpected runtime drift prevents automatic recovery writes' test_safety_external_runtime_blocks_recovery
   run_test 'persistent reload failure still restores saved managed runtime' test_safety_persistent_reload_restores_runtime

@@ -33,8 +33,9 @@ No release, profile-value changes, kernel changes, persistence, or integration.
 ## Evidence and boundaries
 
 Tests use temporary etc/state/sysfs and mocked sysctl/tc; no host mutations.
-The current process has no CAP_NET_ADMIN or CAP_SYS_ADMIN. Real network
-namespace/VM acceptance remains explicitly unverified. Bash cannot atomically
+The default sandbox has no CAP_NET_ADMIN or CAP_SYS_ADMIN. Subsequent authorized
+execution outside the sandbox enabled a guarded fresh-network-namespace tc harness;
+ten real-kernel tc cases passed. Full VM/sysctl acceptance remains unverified. Bash cannot atomically
 commit multiple kernel operations or exclude unrelated privileged writers.
 Uncertain recovery must fail with a retained private journal, never delete an
 unverified qdisc. SIGKILL/power loss leaves a journal that blocks new mutations.
